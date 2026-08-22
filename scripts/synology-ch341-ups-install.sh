@@ -54,6 +54,34 @@ SHUTDOWN_UPS="${SHUTDOWN_UPS:-yes}"
 UPS_OFF_DELAY_SECONDS="${UPS_OFF_DELAY_SECONDS:-300}"
 UPS_ON_DELAY_SECONDS="${UPS_ON_DELAY_SECONDS:-180}"
 HEALTH_NOTIFY_OK_ON_BOOT="${HEALTH_NOTIFY_OK_ON_BOOT:-yes}"
+
+command="install"
+for arg in "$@"; do
+	case "$arg" in
+		install|status|restore)
+			command="$arg"
+			;;
+		WAIT_SECONDS=*)
+			WAIT_SECONDS="${arg#*=}"
+			;;
+		UPS_OFF_DELAY_SECONDS=*)
+			UPS_OFF_DELAY_SECONDS="${arg#*=}"
+			;;
+		UPS_ON_DELAY_SECONDS=*)
+			UPS_ON_DELAY_SECONDS="${arg#*=}"
+			;;
+		HEALTH_NOTIFY_OK_ON_BOOT=*)
+			HEALTH_NOTIFY_OK_ON_BOOT="${arg#*=}"
+			;;
+		DOC_USER=*)
+			DOC_USER="${arg#*=}"
+			;;
+		*)
+			printf 'ERROR: unsupported argument: %s\n' "$arg" >&2
+			exit 2
+			;;
+	esac
+done
 UPS_NAME="${UPS_NAME:-ups}"
 DOC_USER="${DOC_USER:-}"
 DOC_FILE_NAME="${DOC_FILE_NAME:-synology-ups-ch341-notes.md}"
@@ -1185,7 +1213,7 @@ restore() {
 	log "Restore complete. The module file in $MODULE_DIR was left in place."
 }
 
-case "${1:-install}" in
+case "$command" in
 	install)
 		install
 		;;

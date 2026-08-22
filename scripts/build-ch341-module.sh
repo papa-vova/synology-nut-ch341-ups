@@ -5,6 +5,8 @@ set -euo pipefail
 #   DEPS_FILE    Dependency config file. Default: dependencies.env.
 #   WORK_DIR     Build workspace containing downloads/. Default: .work/build.
 #   OUT_DIR      Directory receiving ch341.ko. Default: .work/out.
+#   KERNEL_LOCALVERSION
+#               Kernel localversion appended to vermagic. Default: +.
 #
 # Dependency variables are defined in DEPS_FILE:
 #   DSM_PLATFORM
@@ -41,6 +43,7 @@ deps_file="${DEPS_FILE:-$root_dir/dependencies.env}"
 : "${DSM_PLATFORM:?}"
 : "${KERNEL_SOURCE_ARCHIVE:?}"
 : "${TOOLCHAIN_ARCHIVE:?}"
+kernel_localversion="${KERNEL_LOCALVERSION:-+}"
 
 kernel_archive="$download_dir/$KERNEL_SOURCE_ARCHIVE"
 toolchain_archive="$download_dir/$TOOLCHAIN_ARCHIVE"
@@ -61,16 +64,16 @@ kernel_dir="$source_dir/linux-4.4.x"
 config_file="$kernel_dir/synoconfigs/$DSM_PLATFORM"
 [ -f "$config_file" ] || die "missing kernel config: $config_file"
 
-cross_prefix="$(find "$toolchain_dir" -type f -name 'x86_64*-gcc' -print -quit | sed 's/gcc$//')"
+cross_prefix="$(find "$(cd "$toolchain_dir" && pwd)" -type f -name 'x86_64*-gcc' -print -quit | sed 's/gcc$//')"
 [ -n "$cross_prefix" ] || die "could not find x86_64 cross compiler in $toolchain_dir"
 
 cp "$config_file" "$kernel_dir/.config"
 sed -i 's/^# CONFIG_USB_SERIAL_CH341 is not set/CONFIG_USB_SERIAL_CH341=m/' "$kernel_dir/.config"
 grep -q '^CONFIG_USB_SERIAL=m' "$kernel_dir/.config" || printf '\nCONFIG_USB_SERIAL=m\n' >> "$kernel_dir/.config"
 
-make -C "$kernel_dir" ARCH=x86_64 CROSS_COMPILE="$cross_prefix" oldconfig </dev/null
-make -C "$kernel_dir" ARCH=x86_64 CROSS_COMPILE="$cross_prefix" modules_prepare
-make -C "$kernel_dir" ARCH=x86_64 CROSS_COMPILE="$cross_prefix" M=drivers/usb/serial CONFIG_USB_SERIAL=m CONFIG_USB_SERIAL_CH341=m modules
+make -C "$kernel_dir" ARCH=x86_64 CROSS_COMPILE="$cross_prefix" LOCALVERSION="$kernel_localversion" oldconfig </dev/null
+make -C "$kernel_dir" ARCH=x86_64 CROSS_COMPILE="$cross_prefix" LOCALVERSION="$kernel_localversion" modules_prepare
+make -C "$kernel_dir" ARCH=x86_64 CROSS_COMPILE="$cross_prefix" LOCALVERSION="$kernel_localversion" M=drivers/usb/serial CONFIG_USB_SERIAL=m CONFIG_USB_SERIAL_CH341=m modules
 
 install -m 0644 "$kernel_dir/drivers/usb/serial/ch341.ko" "$out_dir/ch341.ko"
 modinfo "$out_dir/ch341.ko" >&2 || true

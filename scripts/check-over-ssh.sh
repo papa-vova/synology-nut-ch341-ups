@@ -4,8 +4,8 @@ set -euo pipefail
 # Usage:
 #   check-over-ssh.sh user@nas
 #
-# The remote DSM user must already have the permissions installed by
-# nas-bootstrap-permissions.sh. Output is a copy/pasteable health report.
+# The remote DSM user must already have the passwordless sudo permissions
+# documented in README.md. Output is a copy/pasteable health report.
 
 target="${1:-}"
 
@@ -104,21 +104,21 @@ check_enabled ch341-ups-healthcheck.timer
 check_active ch341-ups-watchdog.timer
 check_enabled ch341-ups-watchdog.timer
 
-wait_time="$(/usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_wait_time 2>/dev/null)"
+wait_time="$(sudo /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_wait_time 2>/dev/null)"
 if [ -n "$wait_time" ]; then
   ok "DSM UPS wait time" "${wait_time}s"
 else
   bad "DSM UPS wait time" "not readable"
 fi
 
-safe_shutdown="$(/usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_safeshutdown 2>/dev/null)"
+safe_shutdown="$(sudo /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_safeshutdown 2>/dev/null)"
 if [ -n "$safe_shutdown" ]; then
   ok "DSM UPS output shutdown" "$safe_shutdown"
 else
   bad "DSM UPS output shutdown" "not readable"
 fi
 
-synoups_status="$(/usr/syno/bin/synoups status 2>&1)"
+synoups_status="$(sudo /usr/syno/bin/synoups status 2>&1)"
 case "$synoups_status" in
   *OL*|*OB*|*LB*) ok "DSM UPS status" "$(first_line "$synoups_status")" ;;
   *) bad "DSM UPS status" "$(first_line "$synoups_status")" ;;

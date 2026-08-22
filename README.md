@@ -27,7 +27,7 @@ The setup stays as close as practical to stock DSM:
 - `dependencies.env` selects the Synology GPL kernel source, Synology toolchain, checksums, and DSM platform.
 - `make deps` downloads the configured source/toolchain archives to the local build workspace.
 - `make build` builds only `ch341.ko`; it does not build or replace the DSM kernel.
-- `make bootstrap` and `make install` copy `ch341.ko` and the installer to DSM over SSH.
+- `make install` copies `ch341.ko` and the installer to DSM over SSH.
 - DSM loads `ch341.ko` from `/usr/local`, gets `/dev/ttyUSB*`, then uses the stock NUT stack against that serial TTY.
 
 ### DSM Runtime
@@ -116,30 +116,79 @@ Set local parameters:
 
 ```sh
 export DSM_USER=admin
-export NAS="$DSM_USER@nas"
+export NAS=nas
 export WAIT_SECONDS=900
 export UPS_OFF_DELAY_SECONDS=300
 export UPS_ON_DELAY_SECONDS=180
 ```
 
-- `NAS` is the SSH target used by `bootstrap`, `install`, and `check`.
-- `DSM_USER` is the DSM account authorized by `bootstrap`; normally it is the user part of `NAS`.
+- `NAS` is the NAS SSH host or host alias used by `install`, `check`, and
+  `probe`.
+- `DSM_USER` is the DSM account used for SSH and sudo.
+- `SSH_TARGET` is the full SSH target used internally by the Makefile.
+  Default: `$DSM_USER@$NAS`. Override it only if SSH must use a different target
+  string than the DSM account being authorized.
 - `WAIT_SECONDS` is only the initial DSM UPS wait time written during install. Later UI changes are respected.
 - `UPS_OFF_DELAY_SECONDS` and `UPS_ON_DELAY_SECONDS` configure UPS output cutoff/restore delays.
 - `HEALTH_NOTIFY_OK_ON_BOOT` controls the DSM success notification after the first healthy timer run after boot. Default: `yes`.
   - To disable that notification after install, rerun `make install HEALTH_NOTIFY_OK_ON_BOOT=no`. No module rebuild is needed.
+- `SCP` is the file-copy command used by `install` and `probe`.
+  Default: `scp -O`, which uses legacy SCP mode for Synology systems without
+  an SFTP subsystem.
+- `SUDO_SSH` is the SSH command used for NAS commands that run `sudo`.
+  Default: `ssh`. DSM sudo must be configured so these commands do not prompt.
 - `MODULE` points to the built `ch341.ko` if it is not in the default build location.
+- `KERNEL_LOCALVERSION` is appended to the built module's kernel version.
+  Default: `+`, matching Synology kernels such as `4.4.302+`.
 - `DEPS_FILE` points to the explicit Synology dependency configuration. Default: `dependencies.env`.
 - `WORK_DIR` is the local download/build workspace. Default: `./.work/build`.
 
 The Makefile and scripts document the exact variables they accept.
 
-#### SSH
+#### Mandatory Configuration
 
-Verify SSH:
+The install flow is designed to run unattended. Configure SSH and DSM sudo first;
+interactive password prompts are not supported by the documented flow.
+
+##### SSH Authentication
+
+Configure SSH so the local build machine can connect to DSM without prompts:
+
+- Enable the DSM SSH service.
+- Make the local machine trust the NAS host key.
+- Install the local SSH public key for the DSM account.
+- Load any SSH key passphrase into `ssh-agent`, or use an unencrypted automation
+  key if that matches your security policy.
+
+This command must exit without any prompt:
 
 ```sh
-ssh "$NAS" true
+ssh -o BatchMode=yes "${SSH_TARGET:-$DSM_USER@$NAS}" true
+```
+
+##### DSM Sudo
+
+The DSM account must be allowed to run the install/check/probe commands through
+sudo without a password. Add this sudoers rule on DSM before running the install,
+replacing `admin` with the value of `DSM_USER`:
+
+```text
+admin ALL=(root) NOPASSWD: /bin/sh /tmp/synology-ch341-ups-install.sh install *, /usr/local/sbin/ch341-ups-healthcheck.sh, /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_wait_time, /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_safeshutdown, /usr/syno/bin/synoups status, /bin/sh /tmp/probe-nas-ups.sh
+```
+
+Put the rule in a file under `/etc/sudoers.d/`, keep it mode `0440`, and validate
+it with `visudo` if DSM provides it. The account must be a DSM administrator or
+otherwise allowed by DSM sudo policy.
+
+##### Unattended Run
+
+After SSH and initial sudo are noninteractive, an unattended runner can execute:
+
+```sh
+make deps
+make build
+make install
+make check
 ```
 
 #### DSM Settings
@@ -178,20 +227,6 @@ make build
 For another platform or source set, edit `dependencies.env` or set `DEPS_FILE` to another file with the same variables.
 
 ### Install
-
-#### Bootstrap
-
-Prepare DSM permissions once:
-
-```sh
-make bootstrap
-```
-
-This copies the NAS-side installer and module to `/tmp` over SSH, then runs one `sudo` command on DSM. If DSM asks for the sudo password, enter it in the local terminal. No manual shell work on the NAS is required.
-
-It installs a root-owned apply command and a sudoers entry for the chosen `DSM_USER`, so later `make install` and `make check` can run without prompts.
-
-#### Apply
 
 Install or update the UPS setup:
 
