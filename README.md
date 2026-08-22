@@ -102,6 +102,8 @@ stateDiagram-v2
 
 Run the Make targets on a Linux host, including WSL on Windows. The NAS does not need this repository, the Synology source archive, or the toolchain. Deployment uses SSH and copies only the installer and built module to the NAS.
 
+#### Parameters
+
 Set local parameters:
 
 ```sh
@@ -111,8 +113,6 @@ export WAIT_SECONDS=900
 export UPS_OFF_DELAY_SECONDS=300
 export UPS_ON_DELAY_SECONDS=180
 ```
-
-Parameter overview:
 
 - `NAS` is the SSH target used by `bootstrap`, `install`, and `check`.
 - `DSM_USER` is the DSM account authorized by `bootstrap`; normally it is the user part of `NAS`.
@@ -126,13 +126,17 @@ Parameter overview:
 
 The Makefile and scripts document the exact variables they accept.
 
+#### SSH
+
 Verify SSH:
 
 ```sh
 ssh "$NAS" true
 ```
 
-Set DSM options:
+#### DSM Settings
+
+Set general DSM options:
 
 - Control Panel -> Hardware & Power -> General: enable `Restart automatically when power supply issue is fixed`.
 - Control Panel -> Notification -> Email: configure email delivery if email alerts are required.
@@ -167,6 +171,8 @@ For another platform or source set, edit `dependencies.env` or set `DEPS_FILE` t
 
 ### Install
 
+#### Bootstrap
+
 Prepare DSM permissions once:
 
 ```sh
@@ -176,6 +182,8 @@ make bootstrap
 This copies the NAS-side installer and module to `/tmp` over SSH, then runs one `sudo` command on DSM. If DSM asks for the sudo password, enter it in the local terminal. No manual shell work on the NAS is required.
 
 It installs a root-owned apply command and a sudoers entry for the chosen `DSM_USER`, so later `make install` and `make check` can run without prompts.
+
+#### Apply
 
 Install or update the UPS setup:
 
@@ -190,6 +198,8 @@ make install WAIT_SECONDS=900 UPS_OFF_DELAY_SECONDS=300 UPS_ON_DELAY_SECONDS=180
 ```
 
 ### Check
+
+#### Commands
 
 There are two checks:
 
@@ -208,6 +218,8 @@ make check
 
 Run `make check` after install, after DSM updates, after NAS reboots, and before/after power-loss tests. It confirms that DSM still sees the serial UPS and that the shutdown watchdog is armed before relying on the setup.
 
+#### Coverage
+
 The check verifies:
 
 - installed healthcheck result
@@ -217,6 +229,8 @@ The check verifies:
 - DSM UPS wait time and output-shutdown setting
 - live DSM and NUT UPS status
 
+#### Success
+
 Final success line:
 
 ```text
@@ -225,7 +239,7 @@ UPS monitoring: PASS
 
 ### Test
 
-Short detection test:
+#### Short Detection
 
 1. Run `make check`.
 2. Cut mains input to the UPS.
@@ -239,7 +253,7 @@ Expected:
 - DSM sends or logs mains-restored status after power returns.
 - NAS remains online.
 
-Full shutdown test:
+#### Full Shutdown
 
 1. Charge the UPS enough for the test.
 2. Run `make check`.
