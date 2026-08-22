@@ -38,13 +38,24 @@ UPSMON_CONF="/etc/ups/upsmon.conf"
 UPSSCHED_CONF="/etc/ups/upssched.conf"
 NUTSCAN_USB="/etc/ups/nutscan-usb.h"
 BACKUP_SUFFIX=".ch341ups-bak"
+LOG_TAG="${LOG_TAG:-ch341-ups}"
 
 log() {
-	printf '%s\n' "$*"
+	logger -p user.info -t "$LOG_TAG" "$*" 2>/dev/null || true
+	printf '%s\n' "$*" >&2
+}
+
+report() {
+	if [ "$#" -eq 0 ]; then
+		printf '\n'
+	else
+		printf '%s\n' "$*"
+	fi
 }
 
 die() {
-	log "ERROR: $*" >&2
+	logger -p user.err -t "$LOG_TAG" "$*" 2>/dev/null || true
+	printf 'ERROR: %s\n' "$*" >&2
 	exit 1
 }
 
@@ -104,13 +115,24 @@ UPS_CONF="$UPS_CONF"
 UPSD_USERS="$UPSD_USERS"
 NUTSCAN_USB="$NUTSCAN_USB"
 BACKUP_SUFFIX="$BACKUP_SUFFIX"
+LOG_TAG="$LOG_TAG"
 
 log() {
-	printf '%s\n' "\$*"
+	logger -p user.info -t "\$LOG_TAG" "\$*" 2>/dev/null || true
+	printf '%s\n' "\$*" >&2
+}
+
+report() {
+	if [ "\$#" -eq 0 ]; then
+		printf '\n'
+	else
+		printf '%s\n' "\$*"
+	fi
 }
 
 die() {
-	log "ERROR: \$*" >&2
+	logger -p user.err -t "\$LOG_TAG" "\$*" 2>/dev/null || true
+	printf 'ERROR: %s\n' "\$*" >&2
 	exit 1
 }
 
@@ -302,17 +324,17 @@ stop_stack() {
 }
 
 status_stack() {
-	echo "Kernel modules:"
+	report "Kernel modules:"
 	lsmod | grep -E "^(ch341|usbserial)" || true
-	echo
-	echo "TTY:"
+	report
+	report "TTY:"
 	find_ch341_tty || true
 	ls -l /dev/ttyUSB* 2>/dev/null || true
-	echo
-	echo "Processes:"
+	report
+	report "Processes:"
 	ps aux | grep -E 'nutdrv_qx|upsd|upsmon|upssched' | grep -v grep || true
-	echo
-	echo "UPS status:"
+	report
+	report "UPS status:"
 	/usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>&1 || true
 	/usr/bin/upsc "\$UPS_NAME@localhost" input.voltage 2>/dev/null || true
 	/usr/bin/upsc "\$UPS_NAME@localhost" battery.voltage 2>/dev/null || true
@@ -320,8 +342,8 @@ status_stack() {
 	/usr/bin/upsc "\$UPS_NAME@localhost" battery.runtime 2>/dev/null || true
 	/usr/bin/upsc "\$UPS_NAME@localhost" device.mfr 2>/dev/null || true
 	/usr/bin/upsc "\$UPS_NAME@localhost" device.model 2>/dev/null || true
-	echo
-	echo "Synology config:"
+	report
+	report "Synology config:"
 	grep -E "^(ups_enabled|upsslave_enabled|ups_mode|ups_wait_time|ups_safeshutdown)=" "\$SYNOUPS_CONF" || true
 }
 
@@ -340,7 +362,7 @@ case "\${1:-start}" in
 		status_stack
 		;;
 	*)
-		echo "Usage: \$0 {start|stop|restart|status}" >&2
+		printf 'Usage: %s {start|stop|restart|status}\n' "\$0" >&2
 		exit 2
 		;;
 esac
@@ -538,7 +560,7 @@ fi
 case "\$status" in
 	*OB*|*LB*)
 		if [ ! -f "\$ONBATT_STAMP" ]; then
-			echo "\$now" > "\$ONBATT_STAMP"
+			printf '%s\n' "\$now" > "\$ONBATT_STAMP"
 			log "UPS watchdog saw battery mode: \$status"
 			exit 0
 		fi
@@ -556,7 +578,11 @@ case "\$status" in
 		;;
 esac
 
-since="\$(cat "\$ONBATT_STAMP" 2>/dev/null || echo "\$now")"
+since="\$now"
+if [ -f "\$ONBATT_STAMP" ]; then
+	since="\$(cat "\$ONBATT_STAMP" 2>/dev/null || true)"
+	[ -n "\$since" ] || since="\$now"
+fi
 elapsed=\$((now - since))
 
 wait_seconds="\$(configured_wait_seconds)"
@@ -747,7 +773,7 @@ check_once() {
 
 if check_once; then
 	if [ -e "\$FAIL_STAMP" ]; then
-		notify_admins "UPS monitoring recovered on \$(hostname)" "UPS status is \$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || echo unknown)."
+		notify_admins "UPS monitoring recovered on \$(hostname)" "UPS status is \$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || printf '%s\n' unknown)."
 	fi
 	rm -f "\$FAIL_STAMP" "\$LAST_NOTIFY"
 	exit 0
@@ -760,7 +786,7 @@ sleep 8
 
 if check_once; then
 	if [ -e "\$FAIL_STAMP" ]; then
-		notify_admins "UPS monitoring recovered on \$(hostname)" "UPS status is \$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || echo unknown)."
+		notify_admins "UPS monitoring recovered on \$(hostname)" "UPS status is \$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || printf '%s\n' unknown)."
 	fi
 	rm -f "\$FAIL_STAMP" "\$LAST_NOTIFY"
 	exit 0
@@ -774,13 +800,16 @@ if ! ups_support_enabled; then
 	exit 0
 fi
 last="0"
-[ -f "\$LAST_NOTIFY" ] && last="\$(cat "\$LAST_NOTIFY" 2>/dev/null || echo 0)"
+if [ -f "\$LAST_NOTIFY" ]; then
+	last="\$(cat "\$LAST_NOTIFY" 2>/dev/null || true)"
+	[ -n "\$last" ] || last="0"
+fi
 age=\$((now - last))
 
 if [ ! -e "\$FAIL_STAMP" ] || [ "\$age" -ge "\$NOTIFY_INTERVAL_SECONDS" ]; then
 	message="UPS monitoring is not healthy on \$(hostname). Current issue: \$issues. Before automatic restart: \$first_issues. If this began after a DSM update and a vermagic mismatch is reported, rebuild ch341.ko for the new DSM kernel. Check \\\`systemctl status ch341-ups.service\\\` and \\\`$STACK_SCRIPT status\\\`."
 	notify_admins "UPS monitoring problem on \$(hostname)" "\$message"
-	echo "\$now" > "\$LAST_NOTIFY"
+	printf '%s\n' "\$now" > "\$LAST_NOTIFY"
 	touch "\$FAIL_STAMP"
 fi
 
@@ -972,7 +1001,7 @@ NAS kernel: $(uname -a)
 - Control Panel -> Hardware & Power -> UPS:
   - UPS support should be enabled.
   - UPS type should show USB UPS.
-  - Time before entering Standby/Safe Mode should be 15 minutes.
+  - Time before entering Standby/Safe Mode should match the intended UPS wait time. The install default is 15 minutes.
   - "Shut down UPS when the system enters Standby Mode" should be checked if you want to avoid fully draining the UPS battery during long outages.
 - Control Panel -> Hardware & Power -> General:
   - Enable automatic restart after a power failure if you want the NAS to start after the UPS battery fully drains and AC later returns.
@@ -1000,22 +1029,22 @@ systemctl status ch341-ups-watchdog.service --no-pager
 
 1. Basic status test:
    Run \`$STACK_SCRIPT status\` and verify \`ups.status: OL\`, \`input.voltage\`, and \`battery.voltage\` are present.
-   Also run \`/usr/syno/bin/synoups status\`. Expected result: it ends with \`OL\`; after the fallback-value update it should not print unsupported-variable errors.
+   Also run \`/usr/syno/bin/synoups status\`. Expected: it ends with \`OL\`; after the fallback-value update it should not print unsupported-variable errors.
 
 2. DSM service restart test:
-   Run \`systemctl restart ch341-ups.service\`, then run \`/usr/bin/upsc ups@localhost ups.status\`. Expected result: \`OL\` while mains power is present.
+   Run \`systemctl restart ch341-ups.service\`, then run \`/usr/bin/upsc ups@localhost ups.status\`. Expected: \`OL\` while mains power is present.
 
 3. Healthcheck test:
-   Run \`$HEALTH_SCRIPT\`. Expected result: exit code \`0\` and no warning notification. Check the timers with \`systemctl list-timers ch341-ups-healthcheck.timer ch341-ups-watchdog.timer --no-pager\`.
+   Run \`$HEALTH_SCRIPT\`. Expected: exit code \`0\` and no warning notification. Check the timers with \`systemctl list-timers ch341-ups-healthcheck.timer ch341-ups-watchdog.timer --no-pager\`.
 
 4. Short power-loss test:
-   With no critical writes running, unplug the UPS input from wall power but keep the NAS plugged into the UPS. Within one or two polling intervals, \`/usr/bin/upsc ups@localhost ups.status\` should show \`OB\`. Plug wall power back in before 15 minutes; status should return to \`OL\`, and DSM should not enter Safe Mode.
+   With no critical writes running, unplug the UPS input from wall power but keep the NAS plugged into the UPS. Within one or two polling intervals, \`/usr/bin/upsc ups@localhost ups.status\` should show \`OB\`. Plug wall power back in before the configured DSM wait time expires; status should return to \`OL\`, and DSM should not enter Safe Mode.
 
-5. Fifteen-minute Safe/Standby Mode test:
-   Only run this when it is acceptable for DSM to stop services. Unplug the UPS input from wall power and wait longer than 15 minutes. Expected result: the watchdog sends UPS shutdown-return as root, then DSM enters Safe/Standby Mode. Around \`$UPS_OFF_DELAY_SECONDS\` seconds after the shutdown-return command, UPS output should cut. Restore wall power. The UPS should turn output back on, and the NAS should start because automatic restart after power failure is enabled in Hardware & Power -> General.
+5. Full Safe/Standby Mode test:
+   Only run this when it is acceptable for DSM to stop services. Unplug the UPS input from wall power and wait longer than the configured DSM wait time. Expected: the watchdog sends UPS shutdown-return as root, then DSM enters Safe/Standby Mode. Around \`$UPS_OFF_DELAY_SECONDS\` seconds after the shutdown-return command, UPS output should cut. Restore wall power. The UPS should turn output back on, and the NAS should start because automatic restart after power failure is enabled in Hardware & Power -> General.
 
 6. Shortened full-flow test:
-   For a faster controlled test, temporarily run \`WAIT_SECONDS=60 /bin/sh /tmp/synology-ch341-stock-ups-install.sh install\`, unplug the UPS input, and wait for Safe/Standby Mode plus UPS output shutoff. With the default \`offdelay\`, output cut can take about 5 minutes after the 1-minute timer fires. Restore wall power and confirm the NAS starts. After the test, restore the normal 15-minute setting with \`/bin/sh /tmp/synology-ch341-stock-ups-install.sh install\`.
+   For a faster controlled test, temporarily set the DSM UPS wait time to 1 minute in Control Panel, unplug the UPS input, and wait for Safe/Standby Mode plus UPS output shutoff. With the default \`offdelay\`, output cut can take about 5 minutes after the 1-minute timer fires. Restore wall power and confirm the NAS starts. After the test, restore the normal wait time in DSM.
 
 7. DSM update test:
    After any DSM update, run \`$STACK_SCRIPT status\` and \`$HEALTH_SCRIPT\`. If the kernel version changed and \`ch341.ko\` no longer matches, the healthcheck should notify administrators and the module must be rebuilt for the new kernel.
@@ -1097,7 +1126,7 @@ case "${1:-install}" in
 		restore
 		;;
 	*)
-		echo "Usage: $0 {install|status|restore}" >&2
+		printf 'Usage: %s {install|status|restore}\n' "$0" >&2
 		exit 2
 		;;
 esac

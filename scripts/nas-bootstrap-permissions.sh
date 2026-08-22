@@ -3,8 +3,14 @@ set -eu
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/syno/bin:/usr/syno/sbin
 
+log() {
+  logger -p user.info -t ch341-ups "$*" 2>/dev/null || true
+  printf '%s\n' "$*" >&2
+}
+
 die() {
-  echo "ERROR: $*" >&2
+  logger -p user.err -t ch341-ups "$*" 2>/dev/null || true
+  printf 'ERROR: %s\n' "$*" >&2
   exit 1
 }
 
@@ -33,10 +39,16 @@ set -eu
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/syno/bin:/usr/syno/sbin
 
+die() {
+  logger -p user.err -t ch341-ups "$*" 2>/dev/null || true
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
 for arg in "$@"; do
   case "$arg" in
     WAIT_SECONDS=*|UPS_OFF_DELAY_SECONDS=*|UPS_ON_DELAY_SECONDS=*|DOC_USER=*) ;;
-    *) echo "ERROR: unsupported argument: $arg" >&2; exit 2 ;;
+    *) die "unsupported argument: $arg" ;;
   esac
 done
 
@@ -59,4 +71,4 @@ fi
 mv "$tmp" "$sudoers"
 chmod 0440 "$sudoers"
 
-echo "OK: SSH deploy/check permissions installed for $install_user"
+log "SSH deploy/check permissions installed for $install_user"

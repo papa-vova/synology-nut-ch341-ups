@@ -2,7 +2,13 @@
 set -euo pipefail
 
 target="${1:-}"
-[ -n "$target" ] || { echo "usage: $0 user@nas" >&2; exit 2; }
+
+usage() {
+  printf 'Usage: %s user@nas\n' "$0" >&2
+  exit 2
+}
+
+[ -n "$target" ] || usage
 
 ssh "$target" 'sh -s' <<'REMOTE'
 set +e
@@ -119,10 +125,10 @@ case "$nut_status" in
 esac
 
 if [ "$fail" -eq 0 ]; then
-  echo "RESULT: PASS - UPS monitoring is healthy"
+  printf '%s\n' "UPS monitoring: PASS"
   exit 0
 fi
 
-echo "RESULT: FAIL - UPS monitoring needs attention"
+printf '%s\n' "UPS monitoring: FAIL - see failed checks above"
 exit 1
 REMOTE

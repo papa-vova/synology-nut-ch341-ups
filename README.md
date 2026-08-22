@@ -2,192 +2,194 @@
 
 This project makes a Synology DSM NAS work with a USB-attached non-HID UPS that presents as a QinHeng CH340/CH341 serial bridge, commonly visible as USB ID `1a86:7523`.
 
-The target problem:
+Problem scope:
 
-- DSM's stock USB UPS detection expects a USB HID UPS.
-- This UPS is not HID. DSM sees a USB serial bridge, but does not configure it as a UPS.
+- DSM's stock USB UPS detection expects USB HID.
+- This UPS is not HID; DSM sees a USB serial bridge, but does not configure it as a UPS.
 - There is no off-the-shelf DSM/NUT setup that handles this end-to-end for this device class.
-- After mains power is cut from the UPS, DSM should wait for its configured UPS wait time (default 15 minutes), enter Safe/Standby Mode, and shut down cleanly.
-- The UPS should cut output shortly after that and wait for mains power to return.
-- When mains power returns, the UPS should restore output and the NAS should boot normally.
-- DSM notifications, email-capable alerts, and logs should show whether the setup is healthy.
+- After mains power is cut, DSM should wait for the configured UPS wait time, enter Safe/Standby Mode, ask the UPS to cut output, and later boot normally when UPS output returns.
+- DSM notifications and logs should show whether monitoring is healthy.
 
 The tested device was a Conceptronic UPS exposing USB `1a86:7523` and speaking a Megatec/Qx-style protocol over serial. The tested NAS platform was Synology Gemini Lake with DSM kernel `4.4.302+`.
 
-## Approach
+## Prepare
 
-The setup stays as close as practical to stock DSM:
+Set local parameters:
 
-- DSM's own `nutdrv_qx`, `upsd`, `upsmon`, `upssched`, and `synoups` are used.
-- The added kernel module only creates `/dev/ttyUSB*` for the CH341 bridge.
-- A DSM service drop-in points the stock UPS USB service at the serial-aware startup path.
-- A root-owned watchdog owns the DSM-configured power-loss timer.
-- A healthcheck timer verifies the setup after boot and after DSM updates, then notifies DSM administrators if it breaks.
-
-No Synology kernel, toolchain archive, GPL source archive, or built kernel module is stored in this repository. The build script downloads Synology dependencies on demand.
-
-## Diagrams
-
-```mermaid
-flowchart LR
-  UPS["Non-HID UPS<br/>CH341 USB serial<br/>1a86:7523"] --> Module["ch341.ko<br/>/dev/ttyUSB0"]
-  Module --> Driver["DSM NUT driver<br/>nutdrv_qx<br/>protocol=megatec"]
-  Driver --> Stock["DSM stock UPS stack<br/>upsd / upsmon / synoups"]
-  Stock --> GUI["DSM Hardware & Power<br/>UPS settings"]
-  Stock --> Notify["DSM notifications<br/>email-capable alerts"]
-  Watchdog["Root watchdog<br/>DSM wait-time timer"] --> Stock
-  Watchdog --> Cut["UPS shutdown-return<br/>output cuts after offdelay"]
+```sh
+export DSM_USER=admin
+export NAS="$DSM_USER@nas"
+export WAIT_SECONDS=900
+export UPS_OFF_DELAY_SECONDS=300
+export UPS_ON_DELAY_SECONDS=180
 ```
 
-```mermaid
-stateDiagram-v2
-  state "Running on mains" as RunningOnMains
-  state "Running on UPS battery\nwatchdog timer active" as BatteryGrace
-  state "Safe/Standby requested\nUPS shutdown-return sent" as SafeModeRequested
-  state "DSM in Safe/Standby\nUPS offdelay running" as WaitingForOutputCut
-  state "UPS output off\nNAS unpowered" as PoweredOff
-  state "NAS booting" as Booting
-  state "Monitoring verified" as RecoveryCheck
+Verify SSH:
 
-  [*] --> RunningOnMains
-  RunningOnMains --> BatteryGrace: UPS status becomes OB or LB
-  BatteryGrace --> RunningOnMains: UPS status becomes OL before configured wait time
-  BatteryGrace --> SafeModeRequested: battery timer reaches configured wait time
-  SafeModeRequested --> WaitingForOutputCut: DSM accepts Safe/Standby request
-  WaitingForOutputCut --> PoweredOff: UPS offdelay expires
-  PoweredOff --> Booting: mains returns and UPS output turns on
-  Booting --> RecoveryCheck: DSM boot completes
-  RecoveryCheck --> RunningOnMains: healthcheck passes and UPS status OL
-  RecoveryCheck --> BatteryGrace: healthcheck passes and UPS status OB or LB
+```sh
+ssh "$NAS" true
 ```
+
+DSM settings:
+
+- Control Panel -> Hardware & Power -> General: enable `Restart automatically when power supply issue is fixed`.
+- Control Panel -> Notification -> Email: configure email delivery if email alerts are required.
+
+UPS settings after install:
+
+- Control Panel -> Hardware & Power -> UPS -> Enable UPS support: enabled.
+- UPS type: `USB UPS`.
+- Time before Synology NAS enters Standby Mode: `Customize time`; default install value is 15 minutes.
+- `Shut down UPS when the system enters Standby Mode`: checked if the UPS should cut output after DSM enters Safe/Standby Mode.
+- `Until low battery`: not recommended for this UPS class because battery/runtime reporting is not reliable enough for the shutdown policy.
+
+The watchdog reads DSM's UPS wait time and UPS-output-shutdown setting at runtime. Changing those two UI settings does not require reinstalling.
 
 ## Build
 
-Run on a Linux machine:
-
 ```sh
-./scripts/build-ch341-module.sh
+make build
 ```
 
-The output is:
+Output:
 
 ```text
-.work/out/ch341.ko
+./.work/out/ch341.ko
 ```
 
-The dependency URLs and checksums are in `config/synology-dependencies.env`.
+The build defaults target the tested Gemini Lake DSM kernel. For another platform or source set, override `DSM_PLATFORM`, `KERNEL_SOURCE_URL`, `TOOLCHAIN_URL`, and the matching checksum variables. SHA-256 checks are enabled by default because the build downloads dependencies; set `VERIFY_SHA256=no` only for deliberate experiments.
 
-Set the NAS target once:
+## Install
+
+Prepare DSM permissions once:
 
 ```sh
-DSM_USER=admin
-NAS="$DSM_USER@nas"
+make bootstrap
 ```
 
-## One-Time DSM Permission Setup
-
-Copy the NAS-side scripts and the built module:
+Install or update the UPS setup:
 
 ```sh
-scp scripts/nas-bootstrap-permissions.sh scripts/synology-ch341-ups-install.sh .work/out/ch341.ko "${NAS}:/tmp/"
+make install
 ```
 
-Run the bootstrap once:
+Override install parameters when needed:
 
 ```sh
-ssh "$NAS" "sudo INSTALL_USER=$DSM_USER /bin/sh /tmp/nas-bootstrap-permissions.sh"
+make install WAIT_SECONDS=900 UPS_OFF_DELAY_SECONDS=300 UPS_ON_DELAY_SECONDS=180
 ```
-
-After this, normal install/check operations can run over SSH through the repository scripts.
-
-## Install Or Update
-
-Run from this repository:
-
-```sh
-./scripts/deploy-over-ssh.sh "$NAS"
-```
-
-Defaults:
-
-- `WAIT_SECONDS=900` (deploy default; writes the initial DSM UPS wait time)
-- `UPS_OFF_DELAY_SECONDS=300`
-- `UPS_ON_DELAY_SECONDS=180`
-
-Changing the wait time later in DSM's UPS UI is respected by the watchdog; no reinstall is needed.
-
-Override example:
-
-```sh
-WAIT_SECONDS=900 UPS_OFF_DELAY_SECONDS=300 UPS_ON_DELAY_SECONDS=180 ./scripts/deploy-over-ssh.sh "$NAS"
-```
-
-## DSM Settings
-
-The installer sets the defaults below. After install, DSM remains the source for the wait time and UPS-output-shutdown choice.
-
-Control Panel -> Hardware & Power -> UPS:
-
-- Enable UPS support: must stay enabled. If disabled, the watchdog logs that it is inactive and does not force shutdown behavior.
-- UPS type: keep `USB UPS`. Other DSM UPS types are not part of this serial-bridge setup.
-- Time before Synology NAS enters Standby Mode: use `Customize time`. The watchdog reads this DSM value at runtime. The deploy default is 15 minutes.
-- `Until low battery`: not recommended for this UPS class because battery charge/runtime/low-battery reporting is not reliable enough for the shutdown policy.
-- `Shut down UPS when the system enters Standby Mode`: respected at runtime. If unchecked, DSM can enter Safe/Standby Mode, but the script skips the UPS output-cut command.
-- `Enable network UPS server`: optional; not required by this setup.
-
-Control Panel -> Hardware & Power -> General:
-
-- Enable `Restart automatically when power supply issue is fixed`.
 
 ## Check
 
-Run:
-
 ```sh
-./scripts/check-over-ssh.sh "$NAS"
+make check
 ```
 
-The script reports:
+The check verifies:
 
 - installed healthcheck result
-- CH341 kernel module and serial TTY
-- NUT driver/server/monitor processes
+- CH341 kernel module and `/dev/ttyUSB*`
+- NUT driver, server, and monitor processes
 - DSM UPS services and timers
 - DSM UPS wait time and output-shutdown setting
 - live DSM and NUT UPS status
 
-It ends with:
+Final success line:
 
 ```text
-RESULT: PASS - UPS monitoring is healthy
+UPS monitoring: PASS
 ```
 
 ## Test
 
 Short detection test:
 
-1. Run the check script.
+1. Run `make check`.
 2. Cut mains input to the UPS.
 3. Wait 2 minutes.
 4. Restore mains input.
-5. Run the check script again.
+5. Run `make check` again.
 
-Expected result:
+Expected:
 
 - DSM sends a battery-mode notification.
 - DSM sends or logs mains-restored status after power returns.
-- The NAS remains online.
+- NAS remains online.
 
 Full shutdown test:
 
 1. Charge the UPS enough for the test.
-2. Run the check script.
+2. Run `make check`.
 3. Cut mains input to the UPS.
-4. Wait longer than the configured DSM UPS wait time (15 minutes by default).
-5. DSM should enter Safe/Standby Mode.
-6. UPS output should cut after the configured off-delay.
+4. Wait longer than the configured DSM UPS wait time.
+5. DSM enters Safe/Standby Mode.
+6. UPS output cuts after the configured off-delay.
 7. Restore mains input to the UPS.
-8. The NAS should boot after UPS output returns.
-9. Run the check script again.
+8. UPS output returns after the configured on-delay.
+9. NAS boots.
+10. Run `make check` again.
 
-If the check script reports a problem, use [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+If the check reports a problem, use [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+## Architecture
+
+The setup stays as close as practical to stock DSM:
+
+- DSM's own `nutdrv_qx`, `upsd`, `upsmon`, `upssched`, and `synoups` are used.
+- The added kernel module only creates `/dev/ttyUSB*` for the CH341 bridge.
+- A DSM service drop-in points the stock UPS USB service at the serial-aware startup path.
+- A watchdog owns the DSM-configured power-loss timer.
+- A healthcheck timer verifies the setup after boot and after DSM updates, then notifies DSM administrators if it breaks.
+
+Component sequence:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant M as Mains power
+  participant U as UPS
+  participant N as DSM NUT stack
+  participant W as Watchdog
+  participant S as DSM Safe Mode
+  participant P as NAS power recovery
+
+  M-->>U: power cut
+  U-->>N: reports OB or LB through CH341 serial
+  N-->>W: status available through upsc
+  W->>W: start timer from DSM UPS wait setting
+  alt mains returns before timer expires
+    U-->>N: reports OL
+    W->>W: clear timer
+  else timer expires
+    W-->>U: request shutdown-return
+    W-->>S: request Safe/Standby Mode
+    S-->>S: stop services and protect volumes
+    U-->>P: cut output after offdelay
+    M-->>U: power returns
+    U-->>P: restore output after ondelay
+    P-->>N: NAS boots
+    N-->>W: healthcheck verifies monitoring
+  end
+```
+
+System state machine:
+
+```mermaid
+stateDiagram-v2
+  state "Mains powered" as MainsPowered
+  state "Battery countdown" as BatteryCountdown
+  state "Shutdown requested" as ShutdownRequested
+  state "DSM Safe/Standby" as DSMSafeStandby
+  state "NAS unpowered" as NASUnpowered
+  state "Booting" as Booting
+
+  [*] --> MainsPowered
+  MainsPowered --> BatteryCountdown: UPS reports OB or LB
+  BatteryCountdown --> MainsPowered: UPS reports OL before DSM wait time
+  BatteryCountdown --> ShutdownRequested: DSM wait time expires
+  ShutdownRequested --> DSMSafeStandby: DSM accepts Safe/Standby request
+  DSMSafeStandby --> NASUnpowered: UPS offdelay expires
+  NASUnpowered --> Booting: mains returns and UPS output restores
+  Booting --> MainsPowered: healthcheck passes with OL
+  Booting --> BatteryCountdown: healthcheck passes with OB or LB
+```

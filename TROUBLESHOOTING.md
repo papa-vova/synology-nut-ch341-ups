@@ -7,7 +7,7 @@ DSM_USER=admin
 NAS="$DSM_USER@nas"
 ```
 
-If the check script reports `FAIL`, collect NAS-side details:
+If `make check` reports `FAIL`, collect NAS-side details:
 
 ```sh
 ssh "$NAS" "sudo /usr/local/sbin/synology-ch341-ups-install.sh status"
@@ -19,8 +19,7 @@ ssh "$NAS" "journalctl -u ch341-ups-watchdog.service -u ups-usb.service --since 
 Confirm the USB ID:
 
 ```sh
-scp scripts/probe-nas-ups.sh "${NAS}:/tmp/"
-ssh "$NAS" "sudo /bin/sh /tmp/probe-nas-ups.sh"
+make probe
 ```
 
 If the UPS shows `1a86:7523`, DSM sees USB electrically, but the device is a CH341 serial bridge rather than HID.
@@ -34,7 +33,7 @@ lsmod | grep -E '^(ch341|usbserial)'
 dmesg | grep -iE 'ch341|ttyUSB|1a86|7523|usbserial' | tail -n 80
 ```
 
-If `ch341.ko` does not load after a DSM update, rebuild it for the new DSM kernel and run the deploy script.
+If `ch341.ko` does not load after a DSM update, rebuild it for the new DSM kernel and run `make install`.
 
 ## UPS status stays `OL` while mains is cut
 
