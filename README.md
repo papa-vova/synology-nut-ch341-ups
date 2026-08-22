@@ -104,28 +104,6 @@ sequenceDiagram
   end
 ```
 
-### State Machine
-
-```mermaid
-stateDiagram-v2
-  state "Mains powered" as MainsPowered
-  state "Battery grace period" as BatteryGrace
-  state "Shutdown requested" as ShutdownRequested
-  state "DSM Safe/Standby" as DSMSafeStandby
-  state "UPS output off" as UPSOutputOff
-  state "Booting" as Booting
-
-  [*] --> MainsPowered
-  MainsPowered --> BatteryGrace: UPS reports OB or LB
-  BatteryGrace --> MainsPowered: UPS reports OL before DSM wait time
-  BatteryGrace --> ShutdownRequested: DSM wait time expires
-  ShutdownRequested --> DSMSafeStandby: DSM accepts Safe/Standby request
-  DSMSafeStandby --> UPSOutputOff: UPS offdelay expires
-  UPSOutputOff --> Booting: mains returns and UPS restores output
-  Booting --> MainsPowered: healthcheck passes with OL
-  Booting --> BatteryGrace: healthcheck passes with OB or LB
-```
-
 ## Implementation
 
 ### Prepare
