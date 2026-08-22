@@ -489,6 +489,8 @@ SYNOUPS_CONF="$SYNOUPS_CONF"
 SYNOUPS="/usr/syno/bin/synoups"
 LOG_TAG="ch341-ups"
 SHUTDOWN_SENT="/run/ch341-ups-shutdown-return.sent"
+SAFEMODE_FILE="/tmp/ups.safedown"
+SYNOUPS_SHUTDOWN_TIMEOUT_SECONDS=180
 
 log() {
 	logger -p user.err -t "\$LOG_TAG" "\$*"
@@ -523,12 +525,18 @@ schedule_ups_output_cut() {
 	log "Scheduling UPS shutdown-return before DSM enters Safe Mode"
 	"\$STACK_SCRIPT" start || log "Could not refresh serial UPS stack before shutdown-return command"
 	if ups_output_shutdown_enabled; then
-		if /usr/bin/timeout 25 "\$SYNOUPS" shutdownups; then
-			log "Synology UPS shutdown-return command completed"
-			return 0
+		fail_count_before="\$(grep -F "UPS shutdown fail." "\$SAFEMODE_FILE" 2>/dev/null | wc -l | tr -d ' ')"
+		if /usr/bin/timeout "\$SYNOUPS_SHUTDOWN_TIMEOUT_SECONDS" "\$SYNOUPS" shutdownups; then
+			fail_count_after="\$(grep -F "UPS shutdown fail." "\$SAFEMODE_FILE" 2>/dev/null | wc -l | tr -d ' ')"
+			if [ "\${fail_count_after:-0}" -le "\${fail_count_before:-0}" ]; then
+				log "Synology UPS shutdown-return command completed"
+				return 0
+			fi
+			log "Synology UPS shutdown-return reported failure; trying upsdrvctl shutdown fallback"
+		else
+			log "Synology UPS shutdown-return command failed; trying upsdrvctl shutdown fallback"
 		fi
-		log "Synology UPS shutdown-return command failed; trying upsdrvctl shutdown fallback"
-		/usr/bin/timeout 25 /usr/bin/upsdrvctl -u root shutdown || log "upsdrvctl shutdown fallback failed"
+		/usr/bin/timeout 60 /usr/bin/upsdrvctl -u root shutdown || log "upsdrvctl shutdown fallback failed"
 	fi
 }
 
@@ -575,6 +583,8 @@ SYNOUPS="/usr/syno/bin/synoups"
 STATE_DIR="/run/ch341-ups-watchdog"
 ONBATT_STAMP="\$STATE_DIR/onbattery.since"
 SHUTDOWN_SENT="/run/ch341-ups-shutdown-return.sent"
+SAFEMODE_FILE="/tmp/ups.safedown"
+SYNOUPS_SHUTDOWN_TIMEOUT_SECONDS=180
 LOG_TAG="ch341-ups"
 
 log() {
@@ -657,11 +667,18 @@ log "UPS watchdog battery timer reached \${elapsed}s (configured wait \${wait_se
 "\$STACK_SCRIPT" start || log "UPS watchdog could not refresh serial UPS stack before shutdown-return command"
 
 if ups_output_shutdown_enabled; then
-	if /usr/bin/timeout 25 "\$SYNOUPS" shutdownups; then
-		log "UPS watchdog: Synology UPS shutdown-return command completed"
+	fail_count_before="\$(grep -F "UPS shutdown fail." "\$SAFEMODE_FILE" 2>/dev/null | wc -l | tr -d ' ')"
+	if /usr/bin/timeout "\$SYNOUPS_SHUTDOWN_TIMEOUT_SECONDS" "\$SYNOUPS" shutdownups; then
+		fail_count_after="\$(grep -F "UPS shutdown fail." "\$SAFEMODE_FILE" 2>/dev/null | wc -l | tr -d ' ')"
+		if [ "\${fail_count_after:-0}" -le "\${fail_count_before:-0}" ]; then
+			log "UPS watchdog: Synology UPS shutdown-return command completed"
+		else
+			log "UPS watchdog: Synology UPS shutdown-return reported failure; trying upsdrvctl shutdown fallback"
+			/usr/bin/timeout 60 /usr/bin/upsdrvctl -u root shutdown || log "UPS watchdog: upsdrvctl shutdown fallback failed"
+		fi
 	else
 		log "UPS watchdog: Synology UPS shutdown-return failed; trying upsdrvctl shutdown fallback"
-		/usr/bin/timeout 25 /usr/bin/upsdrvctl -u root shutdown || log "UPS watchdog: upsdrvctl shutdown fallback failed"
+		/usr/bin/timeout 60 /usr/bin/upsdrvctl -u root shutdown || log "UPS watchdog: upsdrvctl shutdown fallback failed"
 	fi
 else
 	log "DSM UPS output shutdown is disabled; skipping UPS output cut"
