@@ -19,11 +19,11 @@ The setup stays as close as practical to stock DSM:
 - DSM's own `nutdrv_qx`, `upsd`, `upsmon`, `upssched`, and `synoups` are used.
 - The added kernel module only creates `/dev/ttyUSB*` for the CH341 bridge.
 - A DSM service drop-in points the stock UPS USB service at the serial-aware startup path.
-- A watchdog owns the DSM-configured power-loss timer.
+- A watchdog timer runs the DSM-configured power-loss decision loop.
 - A healthcheck timer verifies the setup after boot and after DSM updates, then notifies DSM administrators if it breaks.
 - The first healthy healthcheck-timer run after each boot sends a DSM notification to `@administrators` by default. Set `HEALTH_NOTIFY_OK_ON_BOOT=no` to suppress it.
 
-Build/deploy path:
+### Build/Deploy Path
 
 - `dependencies.env` selects the Synology GPL kernel source, Synology toolchain, checksums, and DSM platform.
 - `make deps` downloads the configured source/toolchain archives to the local build workspace.
@@ -31,14 +31,17 @@ Build/deploy path:
 - `make bootstrap` and `make install` copy `ch341.ko` and the installer to DSM over SSH.
 - DSM loads `ch341.ko` from `/usr/local`, gets `/dev/ttyUSB*`, then uses the stock NUT stack against that serial TTY.
 
-DSM runtime:
+### DSM Runtime
 
 - `ch341-ups.service` is enabled under `syno-bootup-done.target`; it restarts DSM's `ups-usb.service` after DSM finishes booting.
 - The `ups-usb.service` drop-in starts DSM's stock NUT processes through the serial-aware wrapper.
-- `ch341-ups-watchdog.timer` runs once per minute. It reads live UPS status with `upsc`, reads DSM UPS settings from `synoups.conf`, and requests Safe/Standby Mode only after the configured DSM wait time has elapsed on battery.
+- The watchdog is `ch341-ups-watchdog.timer` plus `ch341-ups-watchdog.service`, which runs `/usr/local/sbin/ch341-ups-watchdog.sh`. It is a DSM systemd timer, not a separate always-running process.
+- DSM starts the watchdog after `syno-bootup-done.target` and then once per minute. It requires the timer to be active/enabled, DSM UPS support to be enabled, `ups-usb.service` to expose `ups@localhost`, and `upsc ups@localhost ups.status` to return a valid UPS state.
+- On each run, the watchdog reads `ups.status`, `ups_wait_time`, and `ups_safeshutdown`. If status is `OB` or `LB`, it tracks the battery-mode start time in `/run`; if status returns to `OL`, it clears that state; if battery mode lasts longer than the DSM wait time, it requests UPS shutdown-return when enabled and then asks DSM to enter Safe/Standby Mode.
+- Because the watchdog reads DSM settings on every run, UI changes to UPS wait time and UPS output shutdown are used without reinstalling.
 - `ch341-ups-healthcheck.timer` runs 5 minutes after boot and every 15 minutes after that. It checks the module, TTY, DSM service wiring, timers, NUT processes, DSM UPS settings, and live UPS status. It sends DSM notifications through DSM's notification command.
 
-Sequence:
+### Sequence
 
 ```mermaid
 sequenceDiagram
@@ -71,7 +74,7 @@ sequenceDiagram
   end
 ```
 
-State machine:
+### State Machine
 
 ```mermaid
 stateDiagram-v2
@@ -116,7 +119,7 @@ Parameter overview:
 - `WAIT_SECONDS` is only the initial DSM UPS wait time written during install. Later UI changes are respected.
 - `UPS_OFF_DELAY_SECONDS` and `UPS_ON_DELAY_SECONDS` configure UPS output cutoff/restore delays.
 - `HEALTH_NOTIFY_OK_ON_BOOT` controls the DSM success notification after the first healthy timer run after boot. Default: `yes`.
-- To disable that notification after install, rerun `make install HEALTH_NOTIFY_OK_ON_BOOT=no`. No module rebuild is needed.
+  - To disable that notification after install, rerun `make install HEALTH_NOTIFY_OK_ON_BOOT=no`. No module rebuild is needed.
 - `MODULE` points to the built `ch341.ko` if it is not in the default build location.
 - `DEPS_FILE` points to the explicit Synology dependency configuration. Default: `dependencies.env`.
 - `WORK_DIR` is the local download/build workspace. Default: `./.work/build`.
