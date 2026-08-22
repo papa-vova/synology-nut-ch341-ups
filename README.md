@@ -35,10 +35,9 @@ The setup stays as close as practical to stock DSM:
 
 - `ch341-ups.service` is enabled under `syno-bootup-done.target`; it restarts DSM's `ups-usb.service` after DSM finishes booting.
 - The `ups-usb.service` drop-in starts DSM's stock NUT processes through the serial-aware wrapper.
-- The watchdog is `ch341-ups-watchdog.timer` plus `ch341-ups-watchdog.service`, which runs `/usr/local/sbin/ch341-ups-watchdog.sh`. It is a DSM systemd timer, not a separate always-running process.
-- DSM starts the watchdog after `syno-bootup-done.target` and then once per minute. It requires the timer to be active/enabled, DSM UPS support to be enabled, `ups-usb.service` to expose `ups@localhost`, and `upsc ups@localhost ups.status` to return a valid UPS state.
-- On each run, the watchdog reads `ups.status`, `ups_wait_time`, and `ups_safeshutdown`. If status is `OB` or `LB`, it tracks the battery-mode start time in `/run`; if status returns to `OL`, it clears that state; if battery mode lasts longer than the DSM wait time, it requests UPS shutdown-return when enabled and then asks DSM to enter Safe/Standby Mode.
-- Because the watchdog reads DSM settings on every run, UI changes to UPS wait time and UPS output shutdown are used without reinstalling.
+- The watchdog is a DSM systemd timer, not a separate always-running process.
+- It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby shutdown path shown below.
+- It reads DSM's UPS wait time and UPS-output-shutdown setting at runtime, so UI changes are used without reinstalling.
 - `ch341-ups-healthcheck.timer` runs 5 minutes after boot and every 15 minutes after that. It checks the module, TTY, DSM service wiring, timers, NUT processes, DSM UPS settings, and live UPS status. It sends DSM notifications through DSM's notification command.
 
 ### Sequence
