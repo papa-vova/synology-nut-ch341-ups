@@ -6,6 +6,7 @@ set -eu
 #   SHUTDOWN_UPS            yes/no default for DSM UPS output shutdown.
 #   UPS_OFF_DELAY_SECONDS   NUT offdelay before UPS output cutoff.
 #   UPS_ON_DELAY_SECONDS    NUT ondelay before UPS output restore.
+#   HEALTH_NOTIFY_OK_ON_BOOT yes/no success notification after first healthy boot check.
 #   UPS_NAME                Local NUT UPS name. Default: ups.
 #   DOC_USER                DSM user whose home receives the local install note.
 #   DOC_FILE_NAME           Install note filename.
@@ -52,6 +53,7 @@ WAIT_SECONDS="${WAIT_SECONDS:-900}"
 SHUTDOWN_UPS="${SHUTDOWN_UPS:-yes}"
 UPS_OFF_DELAY_SECONDS="${UPS_OFF_DELAY_SECONDS:-300}"
 UPS_ON_DELAY_SECONDS="${UPS_ON_DELAY_SECONDS:-180}"
+HEALTH_NOTIFY_OK_ON_BOOT="${HEALTH_NOTIFY_OK_ON_BOOT:-yes}"
 UPS_NAME="${UPS_NAME:-ups}"
 DOC_USER="${DOC_USER:-}"
 DOC_FILE_NAME="${DOC_FILE_NAME:-synology-ups-ch341-notes.md}"
@@ -455,6 +457,7 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/syno/bin:/usr/syno/sbin
 
 STACK_SCRIPT="$STACK_SCRIPT"
 UPS_NAME="$UPS_NAME"
+SYNOUPS_CONF="$SYNOUPS_CONF"
 SYNOUPS="/usr/syno/bin/synoups"
 BATTERY_NOTIFY="/usr/syno/bin/synoups_battery_notify.sh"
 LOG_TAG="ch341-ups"
@@ -479,6 +482,11 @@ is_on_battery() {
 	return 1
 }
 
+ups_output_shutdown_enabled() {
+	value="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_safeshutdown 2>/dev/null || true)"
+	[ "\$value" = "yes" ]
+}
+
 schedule_ups_output_cut() {
 	if [ -e "\$SHUTDOWN_SENT" ]; then
 		log "UPS shutdown-return already requested; skipping duplicate request"
@@ -487,13 +495,14 @@ schedule_ups_output_cut() {
 	touch "\$SHUTDOWN_SENT"
 	log "Scheduling UPS shutdown-return before DSM enters Safe Mode"
 	"\$STACK_SCRIPT" start || log "Could not refresh serial UPS stack before shutdown-return command"
-if ups_output_shutdown_enabled; then
-	if /usr/bin/timeout 25 "\$SYNOUPS" shutdownups; then
-		log "Synology UPS shutdown-return command completed"
-		return 0
+	if ups_output_shutdown_enabled; then
+		if /usr/bin/timeout 25 "\$SYNOUPS" shutdownups; then
+			log "Synology UPS shutdown-return command completed"
+			return 0
+		fi
+		log "Synology UPS shutdown-return command failed; trying upsdrvctl shutdown fallback"
+		/usr/bin/timeout 25 /usr/bin/upsdrvctl -u root shutdown || log "upsdrvctl shutdown fallback failed"
 	fi
-	log "Synology UPS shutdown-return command failed; trying upsdrvctl shutdown fallback"
-		/usr/bin/timeout 25 /usr/bin/upsdrvctl -u root shutdown || log "UPS watchdog: upsdrvctl shutdown fallback failed"
 }
 
 case "\${1:-}" in
@@ -687,6 +696,7 @@ STACK_SCRIPT="$STACK_SCRIPT"
 UPS_NAME="$UPS_NAME"
 WAIT_SECONDS="$WAIT_SECONDS"
 SHUTDOWN_UPS="$SHUTDOWN_UPS"
+HEALTH_NOTIFY_OK_ON_BOOT_DEFAULT="$HEALTH_NOTIFY_OK_ON_BOOT"
 STACK_UNIT="$STACK_UNIT"
 HEALTH_TIMER="$HEALTH_TIMER"
 STACK_UNIT_NAME="$(basename "$STACK_UNIT")"
@@ -703,9 +713,15 @@ UPSMON_CONF="$UPSMON_CONF"
 SYNOUPS_CONF="$SYNOUPS_CONF"
 FAIL_STAMP="/run/ch341-ups-health.failed"
 LAST_NOTIFY="/run/ch341-ups-health.last-notify"
+BOOT_OK_STAMP="/run/ch341-ups-health.boot-ok-notified"
 NOTIFY_INTERVAL_SECONDS=21600
+HEALTH_NOTIFY_OK_ON_BOOT="\${HEALTH_NOTIFY_OK_ON_BOOT:-\$HEALTH_NOTIFY_OK_ON_BOOT_DEFAULT}"
 
 issues=""
+
+log() {
+	logger -p user.info -t ch341-ups "\$*"
+}
 
 append_issue() {
 	if [ -z "\$issues" ]; then
@@ -723,6 +739,32 @@ notify_admins() {
 		/usr/syno/bin/synodsmnotify -e true -b true -l warn @administrators "\$title" "\$message" >/dev/null 2>&1 || \\
 			/usr/syno/bin/synodsmnotify @administrators "\$title" "\$message" >/dev/null 2>&1 || true
 	fi
+}
+
+notify_admins_info() {
+	title="\$1"
+	message="\$2"
+	logger -p user.info -t ch341-ups "\$title: \$message"
+	if [ -x /usr/syno/bin/synodsmnotify ]; then
+		/usr/syno/bin/synodsmnotify -e true -b true -l info @administrators "\$title" "\$message" >/dev/null 2>&1 || \\
+			/usr/syno/bin/synodsmnotify @administrators "\$title" "\$message" >/dev/null 2>&1 || true
+	fi
+}
+
+ups_support_enabled() {
+	value="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_enabled 2>/dev/null || true)"
+	[ "\$value" = "yes" ]
+}
+
+notify_boot_ok() {
+	[ "\${CH341_HEALTHCHECK_TIMER:-}" = "yes" ] || return 0
+	[ "\$HEALTH_NOTIFY_OK_ON_BOOT" = "yes" ] || return 0
+	[ -e "\$BOOT_OK_STAMP" ] && return 0
+	status="\$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || printf '%s\n' unknown)"
+	wait="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_wait_time 2>/dev/null || true)"
+	safe="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_safeshutdown 2>/dev/null || true)"
+	notify_admins_info "UPS monitoring healthy on \$(hostname)" "UPS status is \${status:-unknown}. DSM wait time is \${wait:-unknown}s. UPS output shutdown is \${safe:-unknown}."
+	touch "\$BOOT_OK_STAMP"
 }
 
 module_vermagic() {
@@ -800,6 +842,7 @@ if check_once; then
 	if [ -e "\$FAIL_STAMP" ]; then
 		notify_admins "UPS monitoring recovered on \$(hostname)" "UPS status is \$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || printf '%s\n' unknown)."
 	fi
+	notify_boot_ok
 	rm -f "\$FAIL_STAMP" "\$LAST_NOTIFY"
 	exit 0
 fi
@@ -813,6 +856,7 @@ if check_once; then
 	if [ -e "\$FAIL_STAMP" ]; then
 		notify_admins "UPS monitoring recovered on \$(hostname)" "UPS status is \$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || printf '%s\n' unknown)."
 	fi
+	notify_boot_ok
 	rm -f "\$FAIL_STAMP" "\$LAST_NOTIFY"
 	exit 0
 fi
@@ -821,7 +865,6 @@ now="\$(date +%s)"
 
 if ! ups_support_enabled; then
 	log "DSM UPS support is disabled; watchdog inactive"
-	rm -f "\$ONBATT_STAMP" "\$SHUTDOWN_SENT"
 	exit 0
 fi
 last="0"
@@ -854,6 +897,7 @@ Wants=ch341-ups.service
 
 [Service]
 Type=oneshot
+Environment=CH341_HEALTHCHECK_TIMER=yes
 ExecStart=$HEALTH_SCRIPT
 EOF
 	chown root:root "$HEALTH_SERVICE" || true
@@ -1019,7 +1063,7 @@ NAS kernel: $(uname -a)
 - \`safe-shutdown.service\` has a drop-in that runs \`$SAFE_SHUTDOWN_SCRIPT\` instead of Synology's original safe-shutdown script. The wrapper preserves Synology's final \`synoups shutdownups\` call, but uses the serial-aware UPS startup path first. This matters because Synology's original script calls \`ups-usb.sh start\` directly, and that script rewrites the serial UPS port to \`auto\`.
 - The NUT driver is configured with \`offdelay = $UPS_OFF_DELAY_SECONDS\` and \`ondelay = $UPS_ON_DELAY_SECONDS\`. Because \`stayoff\` is not set, \`nutdrv_qx\` uses its normal return behavior: shut the load off, then turn it back on after mains power has returned. The exact behavior must be verified with a controlled outage test, because some low-cost UPS firmware ignores parts of the command.
 - The UPS does not report battery charge/runtime/model fields directly. The config supplies NUT fallback values so DSM can display a normal USB UPS. Battery charge is an estimate, and displayed runtime is aligned with the configured DSM wait time; shutdown still uses the fixed timer.
-- The healthcheck timer runs 5 minutes after boot and every 15 minutes after that. It checks live UPS monitoring plus the persistent boot hook, UPS service drop-in, scheduler wrapper, watchdog timer, safe-shutdown drop-in, DSM wait time, and DSM UPS-output-shutdown flag. If the setup is still broken after an automatic restart attempt, it sends a DSM notification to \`@administrators\` with email delivery requested.
+- The healthcheck timer runs 5 minutes after boot and every 15 minutes after that. It checks live UPS monitoring plus the persistent boot hook, UPS service drop-in, scheduler wrapper, watchdog timer, safe-shutdown drop-in, DSM wait time, and DSM UPS-output-shutdown flag. If the setup is still broken after an automatic restart attempt, it sends a DSM notification to \`@administrators\` with email delivery requested. The first healthy timer run after boot sends a success notification by default; set \`HEALTH_NOTIFY_OK_ON_BOOT=no\` during install to suppress it.
 
 ## DSM Settings To Check
 

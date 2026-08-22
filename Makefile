@@ -7,6 +7,7 @@ SHELL := /bin/sh
 #   WAIT_SECONDS            Initial DSM UPS wait time written by install.
 #   UPS_OFF_DELAY_SECONDS   UPS delay before cutting output after shutdown-return.
 #   UPS_ON_DELAY_SECONDS    UPS delay before restoring output after mains returns.
+#   HEALTH_NOTIFY_OK_ON_BOOT yes/no DSM success notification after first healthy boot check.
 #   DEPS_FILE               Dependency config file used by deps/build.
 #   WORK_DIR                Build/download workspace.
 NAS ?=
@@ -15,6 +16,7 @@ MODULE ?= .work/out/ch341.ko
 WAIT_SECONDS ?= 900
 UPS_OFF_DELAY_SECONDS ?= 300
 UPS_ON_DELAY_SECONDS ?= 180
+HEALTH_NOTIFY_OK_ON_BOOT ?= yes
 DEPS_FILE ?= dependencies.env
 WORK_DIR ?= .work/build
 
@@ -53,7 +55,7 @@ bootstrap: require-nas require-module
 
 install: require-nas require-module
 	scp scripts/synology-ch341-ups-install.sh "$(MODULE)" "$(NAS):/tmp/"
-	ssh "$(NAS)" "sudo /usr/local/sbin/synology-nut-ch341-apply.sh WAIT_SECONDS=$(WAIT_SECONDS) UPS_OFF_DELAY_SECONDS=$(UPS_OFF_DELAY_SECONDS) UPS_ON_DELAY_SECONDS=$(UPS_ON_DELAY_SECONDS)"
+	ssh "$(NAS)" "sudo /usr/local/sbin/synology-nut-ch341-apply.sh WAIT_SECONDS=$(WAIT_SECONDS) UPS_OFF_DELAY_SECONDS=$(UPS_OFF_DELAY_SECONDS) UPS_ON_DELAY_SECONDS=$(UPS_ON_DELAY_SECONDS) HEALTH_NOTIFY_OK_ON_BOOT=$(HEALTH_NOTIFY_OK_ON_BOOT)"
 
 check: require-nas
 	./scripts/check-over-ssh.sh "$(NAS)"

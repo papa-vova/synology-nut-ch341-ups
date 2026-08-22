@@ -21,6 +21,7 @@ The setup stays as close as practical to stock DSM:
 - A DSM service drop-in points the stock UPS USB service at the serial-aware startup path.
 - A watchdog owns the DSM-configured power-loss timer.
 - A healthcheck timer verifies the setup after boot and after DSM updates, then notifies DSM administrators if it breaks.
+- The first healthy healthcheck-timer run after each boot sends a DSM notification to `@administrators` by default. Set `HEALTH_NOTIFY_OK_ON_BOOT=no` to suppress it.
 
 Build/deploy path:
 
@@ -29,6 +30,13 @@ Build/deploy path:
 - `make build` builds only `ch341.ko`; it does not build or replace the DSM kernel.
 - `make bootstrap` and `make install` copy `ch341.ko` and the installer to DSM over SSH.
 - DSM loads `ch341.ko` from `/usr/local`, gets `/dev/ttyUSB*`, then uses the stock NUT stack against that serial TTY.
+
+DSM runtime:
+
+- `ch341-ups.service` is enabled under `syno-bootup-done.target`; it restarts DSM's `ups-usb.service` after DSM finishes booting.
+- The `ups-usb.service` drop-in starts DSM's stock NUT processes through the serial-aware wrapper.
+- `ch341-ups-watchdog.timer` runs once per minute. It reads live UPS status with `upsc`, reads DSM UPS settings from `synoups.conf`, and requests Safe/Standby Mode only after the configured DSM wait time has elapsed on battery.
+- `ch341-ups-healthcheck.timer` runs 5 minutes after boot and every 15 minutes after that. It checks the module, TTY, DSM service wiring, timers, NUT processes, DSM UPS settings, and live UPS status. It sends DSM notifications through DSM's notification command.
 
 Sequence:
 
@@ -103,10 +111,12 @@ export UPS_ON_DELAY_SECONDS=180
 
 Parameter overview:
 
-- `NAS` is the SSH target used by `bootstrap`, `install`, `check`, and `probe`.
+- `NAS` is the SSH target used by `bootstrap`, `install`, and `check`.
 - `DSM_USER` is the DSM account authorized by `bootstrap`; normally it is the user part of `NAS`.
 - `WAIT_SECONDS` is only the initial DSM UPS wait time written during install. Later UI changes are respected.
 - `UPS_OFF_DELAY_SECONDS` and `UPS_ON_DELAY_SECONDS` configure UPS output cutoff/restore delays.
+- `HEALTH_NOTIFY_OK_ON_BOOT` controls the DSM success notification after the first healthy timer run after boot. Default: `yes`.
+- To disable that notification after install, rerun `make install HEALTH_NOTIFY_OK_ON_BOOT=no`. No module rebuild is needed.
 - `MODULE` points to the built `ch341.ko` if it is not in the default build location.
 - `DEPS_FILE` points to the explicit Synology dependency configuration. Default: `dependencies.env`.
 - `WORK_DIR` is the local download/build workspace. Default: `./.work/build`.
@@ -173,7 +183,7 @@ make install
 Override install parameters when needed:
 
 ```sh
-make install WAIT_SECONDS=900 UPS_OFF_DELAY_SECONDS=300 UPS_ON_DELAY_SECONDS=180
+make install WAIT_SECONDS=900 UPS_OFF_DELAY_SECONDS=300 UPS_ON_DELAY_SECONDS=180 HEALTH_NOTIFY_OK_ON_BOOT=yes
 ```
 
 ### Check
@@ -193,7 +203,7 @@ make selfcheck
 make check
 ```
 
-Run it after install, after DSM updates, after NAS reboots, and before/after power-loss tests. It confirms that DSM still sees the serial UPS and that the shutdown watchdog is armed before relying on the setup.
+Run `make check` after install, after DSM updates, after NAS reboots, and before/after power-loss tests. It confirms that DSM still sees the serial UPS and that the shutdown watchdog is armed before relying on the setup.
 
 The check verifies:
 
@@ -240,5 +250,3 @@ Full shutdown test:
 10. Run `make check` again.
 
 If the check reports a problem, use [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
-
-`make probe` is a NAS-side diagnostic launched over SSH. Use it for USB/NUT triage, not for local repository checks.

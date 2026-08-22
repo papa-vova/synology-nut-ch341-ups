@@ -54,7 +54,7 @@ die() {
 
 for arg in "$@"; do
   case "$arg" in
-    WAIT_SECONDS=*|UPS_OFF_DELAY_SECONDS=*|UPS_ON_DELAY_SECONDS=*|DOC_USER=*) ;;
+    WAIT_SECONDS=*|UPS_OFF_DELAY_SECONDS=*|UPS_ON_DELAY_SECONDS=*|HEALTH_NOTIFY_OK_ON_BOOT=*|DOC_USER=*) ;;
     *) die "unsupported argument: $arg" ;;
   esac
 done
