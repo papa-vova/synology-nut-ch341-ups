@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Usage:
+#   check-over-ssh.sh user@nas
+#
+# The remote DSM user must already have the permissions installed by
+# nas-bootstrap-permissions.sh. Output is a copy/pasteable health report.
+
 target="${1:-}"
 
 usage() {

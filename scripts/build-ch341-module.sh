@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Environment:
+#   DEPS_FILE    Dependency config file. Default: dependencies.env.
+#   WORK_DIR     Build workspace containing downloads/. Default: .work/build.
+#   OUT_DIR      Directory receiving ch341.ko. Default: .work/out.
+#
+# Dependency variables are defined in DEPS_FILE:
+#   DSM_PLATFORM
+#   KERNEL_SOURCE_ARCHIVE
+#   TOOLCHAIN_ARCHIVE
+#
+# This script does not download dependencies. Run `make deps` first.
 
-DSM_PLATFORM="${DSM_PLATFORM:-geminilake}"
-KERNEL_SOURCE_URL="${KERNEL_SOURCE_URL:-https://global.synologydownload.com/download/ToolChain/Synology%20NAS%20GPL%20Source/7.3-86009/geminilake/linux-4.4.x.txz}"
-KERNEL_SOURCE_SHA256="${KERNEL_SOURCE_SHA256:-052359f42ac8bd311fa99286ff97d576eab747a8242ea5765c3b1c78b002f2de}"
-TOOLCHAIN_URL="${TOOLCHAIN_URL:-https://global.synologydownload.com/download/ToolChain/toolchain/7.4-90075/Intel%20x86%20Linux%204.4.302%20%28GeminiLake%29/geminilake-gcc1220_glibc236_x86_64-GPL.txz}"
-TOOLCHAIN_SHA256="${TOOLCHAIN_SHA256:-97c2ec36e0130a2f7cd510655a7bf8c34b204311fcbd48001cc1ac4f61dcf030}"
-VERIFY_SHA256="${VERIFY_SHA256:-yes}"
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 work_dir="${WORK_DIR:-$root_dir/.work/build}"
 download_dir="$work_dir/downloads"
@@ -27,24 +32,21 @@ die() {
   exit 1
 }
 
-fetch() {
-  local url="$1"
-  local sha="$2"
-  local dst="$3"
-  if [ ! -f "$dst" ]; then
-    log "Downloading $(basename "$dst")"
-    curl -fL --retry 3 --output "$dst" "$url"
-  fi
-  if [ "$VERIFY_SHA256" = "yes" ]; then
-    log "Verifying $(basename "$dst")"
-    printf '%s  %s\n' "$sha" "$dst" | sha256sum -c - >&2
-  fi
-}
+deps_file="${DEPS_FILE:-$root_dir/dependencies.env}"
+[ -f "$deps_file" ] || die "missing dependency config: $deps_file"
 
-kernel_archive="$download_dir/linux-4.4.x.txz"
-toolchain_archive="$download_dir/geminilake-gcc1220_glibc236_x86_64-GPL.txz"
-fetch "$KERNEL_SOURCE_URL" "$KERNEL_SOURCE_SHA256" "$kernel_archive"
-fetch "$TOOLCHAIN_URL" "$TOOLCHAIN_SHA256" "$toolchain_archive"
+# shellcheck disable=SC1090
+. "$deps_file"
+
+: "${DSM_PLATFORM:?}"
+: "${KERNEL_SOURCE_ARCHIVE:?}"
+: "${TOOLCHAIN_ARCHIVE:?}"
+
+kernel_archive="$download_dir/$KERNEL_SOURCE_ARCHIVE"
+toolchain_archive="$download_dir/$TOOLCHAIN_ARCHIVE"
+
+[ -f "$kernel_archive" ] || die "missing kernel source archive: $kernel_archive; run make deps"
+[ -f "$toolchain_archive" ] || die "missing toolchain archive: $toolchain_archive; run make deps"
 
 if [ ! -d "$source_dir/linux-4.4.x" ]; then
   log "Extracting kernel source"

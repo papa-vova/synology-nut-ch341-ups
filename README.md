@@ -81,6 +81,8 @@ stateDiagram-v2
 
 ### Prepare
 
+Run the Make targets on a Linux host, including WSL on Windows. The NAS does not need this repository, the Synology source archive, or the toolchain. Deployment uses SSH and copies only the installer and built module to the NAS.
+
 Set local parameters:
 
 ```sh
@@ -90,6 +92,18 @@ export WAIT_SECONDS=900
 export UPS_OFF_DELAY_SECONDS=300
 export UPS_ON_DELAY_SECONDS=180
 ```
+
+Parameter overview:
+
+- `NAS` is the SSH target used by `bootstrap`, `install`, `check`, and `probe`.
+- `DSM_USER` is the DSM account authorized by `bootstrap`; normally it is the user part of `NAS`.
+- `WAIT_SECONDS` is only the initial DSM UPS wait time written during install. Later UI changes are respected.
+- `UPS_OFF_DELAY_SECONDS` and `UPS_ON_DELAY_SECONDS` configure UPS output cutoff/restore delays.
+- `MODULE` points to the built `ch341.ko` if it is not in the default build location.
+- `DEPS_FILE` points to the explicit Synology dependency configuration. Default: `dependencies.env`.
+- `WORK_DIR` is the local download/build workspace. Default: `./.work/build`.
+
+The Makefile and scripts document the exact variables they accept.
 
 Verify SSH:
 
@@ -114,17 +128,21 @@ The watchdog reads DSM's UPS wait time and UPS-output-shutdown setting at runtim
 
 ### Build
 
+Inspect `dependencies.env` first. It declares the Synology kernel source archive, toolchain archive, checksums, and platform name.
+
+Download the configured dependencies:
+
+```sh
+make deps
+```
+
+Build the module from the already-downloaded dependencies:
+
 ```sh
 make build
 ```
 
-Output:
-
-```text
-./.work/out/ch341.ko
-```
-
-The build defaults target the tested Gemini Lake DSM kernel. For another platform or source set, override `DSM_PLATFORM`, `KERNEL_SOURCE_URL`, `TOOLCHAIN_URL`, and the matching checksum variables. SHA-256 checks are enabled by default because the build downloads dependencies; set `VERIFY_SHA256=no` only for deliberate experiments.
+For another platform or source set, edit `dependencies.env` or set `DEPS_FILE` to another file with the same variables.
 
 ### Install
 
@@ -133,6 +151,10 @@ Prepare DSM permissions once:
 ```sh
 make bootstrap
 ```
+
+This copies the NAS-side installer and module to `/tmp` over SSH, then runs one `sudo` command on DSM. If DSM asks for the sudo password, enter it in the local terminal. No manual shell work on the NAS is required.
+
+It installs a root-owned apply command and a sudoers entry for the chosen `DSM_USER`, so later `make install` and `make check` can run without prompts.
 
 Install or update the UPS setup:
 
@@ -148,9 +170,22 @@ make install WAIT_SECONDS=900 UPS_OFF_DELAY_SECONDS=300 UPS_ON_DELAY_SECONDS=180
 
 ### Check
 
+There are two checks:
+
+| Command | Runs where | Purpose |
+| --- | --- | --- |
+| `make selfcheck` | local Linux/WSL host | Validate dependency config, shell syntax, and Makefile wiring. No downloads, no NAS access. |
+| `make check` | local host plus SSH to NAS | Verify the installed DSM runtime: module, TTY, NUT processes, DSM services/timers, DSM UPS settings, and live UPS status. |
+
+```sh
+make selfcheck
+```
+
 ```sh
 make check
 ```
+
+Run it after install, after DSM updates, after NAS reboots, and before/after power-loss tests. It confirms that DSM still sees the serial UPS and that the shutdown watchdog is armed before relying on the setup.
 
 The check verifies:
 
@@ -197,3 +232,5 @@ Full shutdown test:
 10. Run `make check` again.
 
 If the check reports a problem, use [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+`make probe` is a NAS-side diagnostic launched over SSH. Use it for USB/NUT triage, not for local repository checks.

@@ -1,6 +1,31 @@
 #!/bin/sh
 set -eu
 
+# Public environment:
+#   WAIT_SECONDS            Initial DSM UPS wait time written at install.
+#   SHUTDOWN_UPS            yes/no default for DSM UPS output shutdown.
+#   UPS_OFF_DELAY_SECONDS   NUT offdelay before UPS output cutoff.
+#   UPS_ON_DELAY_SECONDS    NUT ondelay before UPS output restore.
+#   UPS_NAME                Local NUT UPS name. Default: ups.
+#   DOC_USER                DSM user whose home receives the local install note.
+#   DOC_FILE_NAME           Install note filename.
+#
+# Device selection:
+#   VID                     USB vendor ID for the serial bridge. Default: 1a86.
+#   PID                     USB product ID for the serial bridge. Default: 7523.
+#
+# Input/output paths:
+#   MODULE_SRC              Source ch341.ko path during install. Default: /tmp/ch341.ko.
+#   MODULE_DIR              Persistent module directory under /usr/local.
+#
+# Advanced install path overrides:
+#   STACK_SCRIPT, HEALTH_SCRIPT, SAFE_SHUTDOWN_SCRIPT, UPSSCHED_CMD_SCRIPT
+#   WATCHDOG_SCRIPT, STACK_UNIT, HEALTH_SERVICE, HEALTH_TIMER
+#   WATCHDOG_SERVICE, WATCHDOG_TIMER, SAFE_SHUTDOWN_DROPIN_DIR
+#   UPS_USB_DROPIN_DIR, UDEV_RULE
+#
+# Normal installs should not override advanced paths.
+
 PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/syno/bin:/usr/syno/sbin
 
 MODULE_SRC="${MODULE_SRC:-/tmp/ch341.ko}"

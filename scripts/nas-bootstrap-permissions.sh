@@ -1,6 +1,13 @@
 #!/bin/sh
 set -eu
 
+# Environment:
+#   INSTALL_USER   DSM user allowed to run later install/check commands through sudo.
+#
+# Inputs expected in /tmp before running:
+#   /tmp/synology-ch341-ups-install.sh
+#   /tmp/ch341.ko
+
 PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/syno/bin:/usr/syno/sbin
 
 log() {

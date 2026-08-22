@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+# Environment:
+#   UPS_NAME   Local NUT UPS name to query. Default: ups.
+
 PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/syno/bin:/usr/syno/sbin
 UPS_NAME="${UPS_NAME:-ups}"
 
