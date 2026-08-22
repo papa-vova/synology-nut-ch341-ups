@@ -22,6 +22,14 @@ The setup stays as close as practical to stock DSM:
 - A watchdog owns the DSM-configured power-loss timer.
 - A healthcheck timer verifies the setup after boot and after DSM updates, then notifies DSM administrators if it breaks.
 
+Build/deploy path:
+
+- `dependencies.env` selects the Synology GPL kernel source, Synology toolchain, checksums, and DSM platform.
+- `make deps` downloads the configured source/toolchain archives to the local build workspace.
+- `make build` builds only `ch341.ko`; it does not build or replace the DSM kernel.
+- `make bootstrap` and `make install` copy `ch341.ko` and the installer to DSM over SSH.
+- DSM loads `ch341.ko` from `/usr/local`, gets `/dev/ttyUSB*`, then uses the stock NUT stack against that serial TTY.
+
 Sequence:
 
 ```mermaid
