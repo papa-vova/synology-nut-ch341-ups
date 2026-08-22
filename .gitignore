@@ -1,0 +1,20 @@
+# Local build workspace and downloaded Synology archives.
+.work/
+local-cache/
+
+# Generated kernel artifacts.
+*.ko
+*.o
+*.mod.c
+*.mod
+*.order
+Module.symvers
+modules.order
+.tmp_versions/
+
+# Logs and temporary files.
+*.log
+*.pid
+*.swp
+.DS_Store
+Thumbs.db
