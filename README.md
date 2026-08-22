@@ -2,7 +2,9 @@
 
 This project makes a Synology DSM NAS work with a USB-attached non-HID UPS that presents as a QinHeng CH340/CH341 serial bridge, commonly visible as USB ID `1a86:7523`.
 
-Problem scope:
+The tested device was a Conceptronic UPS exposing USB `1a86:7523` and speaking a Megatec/Qx-style protocol over serial. The tested NAS platform was Synology Gemini Lake with DSM kernel `4.4.302+`.
+
+## Problem
 
 - DSM's stock USB UPS detection expects USB HID.
 - This UPS is not HID; DSM sees a USB serial bridge, but does not configure it as a UPS.
@@ -10,9 +12,74 @@ Problem scope:
 - After mains power is cut, DSM should wait for the configured UPS wait time, enter Safe/Standby Mode, ask the UPS to cut output, and later boot normally when UPS output returns.
 - DSM notifications and logs should show whether monitoring is healthy.
 
-The tested device was a Conceptronic UPS exposing USB `1a86:7523` and speaking a Megatec/Qx-style protocol over serial. The tested NAS platform was Synology Gemini Lake with DSM kernel `4.4.302+`.
+## Solution Architecture
 
-## Prepare
+The setup stays as close as practical to stock DSM:
+
+- DSM's own `nutdrv_qx`, `upsd`, `upsmon`, `upssched`, and `synoups` are used.
+- The added kernel module only creates `/dev/ttyUSB*` for the CH341 bridge.
+- A DSM service drop-in points the stock UPS USB service at the serial-aware startup path.
+- A watchdog owns the DSM-configured power-loss timer.
+- A healthcheck timer verifies the setup after boot and after DSM updates, then notifies DSM administrators if it breaks.
+
+Sequence:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant M as mains power
+  participant U as ups
+  participant W as watchdog
+  participant D as dsm
+
+  M-->>U: power cut
+  U-->>D: reports OB or LB over CH341 serial
+  D-->>W: exposes UPS status and wait setting
+  W->>W: start battery timer
+  alt mains returns before timer expires
+    M-->>U: power returns
+    U-->>D: reports OL
+    D-->>W: exposes OL
+    W->>W: clear battery timer
+  else timer expires
+    W-->>U: request shutdown-return
+    W-->>D: request Safe/Standby Mode
+    D->>D: stop services and protect volumes
+    U->>U: wait offdelay, then cut output
+    M-->>U: power returns
+    U->>U: wait ondelay, then restore output
+    U-->>D: supply power
+    D->>D: boot and start UPS services
+    D-->>W: expose current UPS status
+    W->>W: verify monitoring and clear outage state
+  end
+```
+
+State machine:
+
+```mermaid
+stateDiagram-v2
+  state "Mains powered" as MainsPowered
+  state "Battery grace period" as BatteryGrace
+  state "Shutdown requested" as ShutdownRequested
+  state "DSM Safe/Standby" as DSMSafeStandby
+  state "UPS output off" as UPSOutputOff
+  state "Booting" as Booting
+
+  [*] --> MainsPowered
+  MainsPowered --> BatteryGrace: UPS reports OB or LB
+  BatteryGrace --> MainsPowered: UPS reports OL before DSM wait time
+  BatteryGrace --> ShutdownRequested: DSM wait time expires
+  ShutdownRequested --> DSMSafeStandby: DSM accepts Safe/Standby request
+  DSMSafeStandby --> UPSOutputOff: UPS offdelay expires
+  UPSOutputOff --> Booting: mains returns and UPS restores output
+  Booting --> MainsPowered: healthcheck passes with OL
+  Booting --> BatteryGrace: healthcheck passes with OB or LB
+```
+
+## Implementation
+
+### Prepare
 
 Set local parameters:
 
@@ -30,12 +97,12 @@ Verify SSH:
 ssh "$NAS" true
 ```
 
-DSM settings:
+Set DSM options:
 
 - Control Panel -> Hardware & Power -> General: enable `Restart automatically when power supply issue is fixed`.
 - Control Panel -> Notification -> Email: configure email delivery if email alerts are required.
 
-UPS settings after install:
+UPS options after install:
 
 - Control Panel -> Hardware & Power -> UPS -> Enable UPS support: enabled.
 - UPS type: `USB UPS`.
@@ -45,7 +112,7 @@ UPS settings after install:
 
 The watchdog reads DSM's UPS wait time and UPS-output-shutdown setting at runtime. Changing those two UI settings does not require reinstalling.
 
-## Build
+### Build
 
 ```sh
 make build
@@ -59,7 +126,7 @@ Output:
 
 The build defaults target the tested Gemini Lake DSM kernel. For another platform or source set, override `DSM_PLATFORM`, `KERNEL_SOURCE_URL`, `TOOLCHAIN_URL`, and the matching checksum variables. SHA-256 checks are enabled by default because the build downloads dependencies; set `VERIFY_SHA256=no` only for deliberate experiments.
 
-## Install
+### Install
 
 Prepare DSM permissions once:
 
@@ -79,7 +146,7 @@ Override install parameters when needed:
 make install WAIT_SECONDS=900 UPS_OFF_DELAY_SECONDS=300 UPS_ON_DELAY_SECONDS=180
 ```
 
-## Check
+### Check
 
 ```sh
 make check
@@ -100,7 +167,7 @@ Final success line:
 UPS monitoring: PASS
 ```
 
-## Test
+### Test
 
 Short detection test:
 
@@ -130,66 +197,3 @@ Full shutdown test:
 10. Run `make check` again.
 
 If the check reports a problem, use [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
-
-## Architecture
-
-The setup stays as close as practical to stock DSM:
-
-- DSM's own `nutdrv_qx`, `upsd`, `upsmon`, `upssched`, and `synoups` are used.
-- The added kernel module only creates `/dev/ttyUSB*` for the CH341 bridge.
-- A DSM service drop-in points the stock UPS USB service at the serial-aware startup path.
-- A watchdog owns the DSM-configured power-loss timer.
-- A healthcheck timer verifies the setup after boot and after DSM updates, then notifies DSM administrators if it breaks.
-
-Component sequence:
-
-```mermaid
-sequenceDiagram
-  autonumber
-  participant M as Mains power
-  participant U as UPS
-  participant N as DSM NUT stack
-  participant W as Watchdog
-  participant S as DSM Safe Mode
-  participant P as NAS power recovery
-
-  M-->>U: power cut
-  U-->>N: reports OB or LB through CH341 serial
-  N-->>W: status available through upsc
-  W->>W: start timer from DSM UPS wait setting
-  alt mains returns before timer expires
-    U-->>N: reports OL
-    W->>W: clear timer
-  else timer expires
-    W-->>U: request shutdown-return
-    W-->>S: request Safe/Standby Mode
-    S-->>S: stop services and protect volumes
-    U-->>P: cut output after offdelay
-    M-->>U: power returns
-    U-->>P: restore output after ondelay
-    P-->>N: NAS boots
-    N-->>W: healthcheck verifies monitoring
-  end
-```
-
-System state machine:
-
-```mermaid
-stateDiagram-v2
-  state "Mains powered" as MainsPowered
-  state "Battery countdown" as BatteryCountdown
-  state "Shutdown requested" as ShutdownRequested
-  state "DSM Safe/Standby" as DSMSafeStandby
-  state "NAS unpowered" as NASUnpowered
-  state "Booting" as Booting
-
-  [*] --> MainsPowered
-  MainsPowered --> BatteryCountdown: UPS reports OB or LB
-  BatteryCountdown --> MainsPowered: UPS reports OL before DSM wait time
-  BatteryCountdown --> ShutdownRequested: DSM wait time expires
-  ShutdownRequested --> DSMSafeStandby: DSM accepts Safe/Standby request
-  DSMSafeStandby --> NASUnpowered: UPS offdelay expires
-  NASUnpowered --> Booting: mains returns and UPS output restores
-  Booting --> MainsPowered: healthcheck passes with OL
-  Booting --> BatteryCountdown: healthcheck passes with OB or LB
-```
