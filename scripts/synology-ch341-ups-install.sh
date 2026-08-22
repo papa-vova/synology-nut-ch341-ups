@@ -1060,17 +1060,17 @@ NAS kernel: $(uname -a)
 
 ## DSM Settings To Check
 
+- Control Panel -> Hardware & Power -> General:
+  - Enable automatic restart after a power failure if you want the NAS to start after the UPS battery fully drains and AC later returns.
+- Control Panel -> Notification -> Email:
+  - Confirm email delivery is configured and tested.
+  - In Control Panel -> Notification -> Rules, edit the email-enabled rule and tick the Power supply UPS events that you want to be notified about.
+  - The installer does not change DSM Notification Rule membership. Configure those checkboxes in DSM UI; the installed scripts always emit the stock UPS events, and DSM rules decide which delivery channels receive them.
 - Control Panel -> Hardware & Power -> UPS:
   - UPS support should be enabled.
   - UPS type should show USB UPS.
   - Time before entering Standby/Safe Mode should match the intended UPS wait time. The install default is 15 minutes.
   - "Shut down UPS when the system enters Standby Mode" should be checked if you want to avoid fully draining the UPS battery during long outages.
-- Control Panel -> Hardware & Power -> General:
-  - Enable automatic restart after a power failure if you want the NAS to start after the UPS battery fully drains and AC later returns.
-- Control Panel -> Notification -> Email:
-  - Confirm email delivery is configured and tested.
-  - In Control Panel -> Notification -> Rules, edit the email-enabled rule and tick all five Power supply UPS events, including both Info events: \`The UPS has been connected\` and \`The UPS has returned to AC mode\`.
-  - The installer does not change DSM Notification Rule membership. Configure those checkboxes in DSM UI; the installed scripts always emit the stock UPS events, and DSM rules decide which delivery channels receive them.
 - If you change UPS settings in Control Panel and DSM restarts its own wrapper, run \`systemctl restart ch341-ups.service\` afterward. The healthcheck will also try to recover this automatically.
 
 ## Useful Commands

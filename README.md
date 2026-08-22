@@ -126,22 +126,8 @@ export UPS_ON_DELAY_SECONDS=180
 - `NAS` is only the NAS hostname or SSH host alias used by `install`, `check`,
   and `probe`.
 - `DSM_USER` is the DSM account used for SSH login and sudo authorization.
-- `SSH_TARGET` is the full SSH destination used internally by the Makefile.
-  Default: `$DSM_USER@$NAS`.
 - `WAIT_SECONDS` is only the initial DSM UPS wait time written during install. Later UI changes are respected.
 - `UPS_OFF_DELAY_SECONDS` and `UPS_ON_DELAY_SECONDS` configure UPS output cutoff/restore delays.
-- `SCP` is the file-copy command used by `install` and `probe`.
-  Default: `scp -O`, which uses legacy SCP mode for Synology systems without
-  an SFTP subsystem.
-- `SUDO_SSH` is the SSH command used for NAS commands that run `sudo`.
-  Default: `ssh`. DSM sudo must be configured so these commands do not prompt.
-- `MODULE` points to the built `ch341.ko` if it is not in the default build location.
-- `KERNEL_LOCALVERSION` is appended to the built module's kernel version.
-  Default: `+`, matching Synology kernels such as `4.4.302+`.
-- `DEPS_FILE` points to the explicit Synology dependency configuration. Default: `dependencies.env`.
-- `WORK_DIR` is the local download/build workspace. Default: `./.work/build`.
-
-The Makefile and scripts document the exact variables they accept.
 
 #### Passwordless Access Configuration (Mandatory)
 
@@ -170,12 +156,19 @@ ssh -o BatchMode=yes "$DSM_USER@$NAS" true
 The DSM account must be allowed to run this repository's install/check/probe
 commands through sudo without a password. Run this once after setting the
 solution parameters; it replaces this repository's sudoers file with the current
-rule and validates the result:
+rule:
 
 ```sh
 ssh "$DSM_USER@$NAS" "sudo /bin/sh -se -- '$DSM_USER'" <<'EOF'
 set -eu
 DSM_USER="$1"
+
+case "$DSM_USER" in
+	""|*[!A-Za-z0-9._-]*)
+		printf 'ERROR: invalid DSM_USER for sudoers rule: %s\n' "$DSM_USER" >&2
+		exit 2
+		;;
+esac
 
 sudoers=/etc/sudoers.d/synology-nut-ch341-ups
 tmp="${sudoers}.tmp"
@@ -185,16 +178,13 @@ $DSM_USER ALL=(root) NOPASSWD: /bin/true, /bin/sh /tmp/synology-ch341-ups-instal
 EORULE
 
 chmod 0440 "$tmp"
-if command -v visudo >/dev/null 2>&1; then
-	visudo -cf "$tmp"
-fi
 mv "$tmp" "$sudoers"
 chmod 0440 "$sudoers"
-sudo -n -l -U "$DSM_USER" | grep -F '/tmp/synology-ch341-ups-install.sh' >/dev/null
 EOF
 ```
 
-After that, this command must exit without a password prompt:
+Then test the installed rule with an actual passwordless sudo command. This
+must exit without a password prompt:
 
 ```sh
 ssh "$DSM_USER@$NAS" sudo -n /bin/true
@@ -202,7 +192,7 @@ ssh "$DSM_USER@$NAS" sudo -n /bin/true
 
 #### DSM Settings
 
-Set general DSM options:
+##### General DSM Options
 
 - Control Panel -> Hardware & Power -> General: enable `Restart automatically when power supply issue is fixed`.
 - Control Panel -> Notification -> Email: configure and test email delivery.
@@ -216,7 +206,7 @@ rules. Before relying on remote UPS alerts, configure the email-enabled rule:
 2. Select the rule that has your email address in the Email column, for example
    `default`, and click Edit.
 3. Expand Power System or Power supply.
-4. Tick all five UPS events:
+4. Tick all events that you want to be notified about:
    - Info: `The UPS has been connected`
    - Critical: `The UPS has been disconnected`
    - Warning: `The UPS has entered battery mode`
@@ -224,25 +214,11 @@ rules. Before relying on remote UPS alerts, configure the email-enabled rule:
    - Info: `The UPS has returned to AC mode`
 5. Save the rule and click Apply.
 
-The two Info events are mandatory for positive remote assurance. Without them,
-DSM can still warn about battery or disconnect events, but it will not email the
-successful boot/start event or the return-to-AC event.
-
-The installer uses DSM's stock UPS notification path for these events:
-
-| DSM event | When this repository causes or relies on it |
-| --- | --- |
-| `The UPS has been connected` | Emitted after a successful UPS stack start, including after boot. |
-| `The UPS has been disconnected` | Emitted on UPS USB removal and when the healthcheck still cannot reach the UPS after an automatic restart attempt. |
-| `The UPS has entered battery mode` | Emitted by DSM/NUT when the UPS reports battery mode. |
-| `The UPS has reached low battery` | Emitted by DSM/NUT when the UPS reports low battery or forced shutdown. |
-| `The UPS has returned to AC mode` | Emitted by DSM/NUT when mains power returns. |
-
 The installer does not change DSM Notification Rule membership. Configure these
 checkboxes in DSM UI; the installer always emits the stock UPS events, and DSM
 rules decide which delivery channels receive them.
 
-UPS options after install:
+##### DSM UPS Options
 
 - Control Panel -> Hardware & Power -> UPS -> Enable UPS support: enabled.
 - UPS type: `USB UPS`.
@@ -268,18 +244,10 @@ Build the module from the already-downloaded dependencies:
 make build
 ```
 
-For another platform or source set, edit `dependencies.env` or set `DEPS_FILE` to another file with the same variables.
-
 Install or update the UPS setup:
 
 ```sh
 make install
-```
-
-Override install parameters when needed:
-
-```sh
-make install WAIT_SECONDS=900 UPS_OFF_DELAY_SECONDS=300 UPS_ON_DELAY_SECONDS=180
 ```
 
 ### Testing
@@ -308,9 +276,6 @@ Expected final line:
 UPS monitoring: PASS
 ```
 
-`make check` cannot verify DSM Notification Rule checkboxes. Confirm those in
-Control Panel -> Notification -> Rules before relying on email delivery.
-
 #### Short Detection
 
 1. Run `make check`.
@@ -321,8 +286,8 @@ Control Panel -> Notification -> Rules before relying on email delivery.
 
 Expected:
 
-- DSM sends a battery-mode notification.
-- DSM sends the return-to-AC notification after power returns.
+- DSM sends a battery-mode notification (if configured).
+- DSM sends the return-to-AC notification after power returns (if configured).
 - NAS remains online.
 
 #### Full Shutdown
@@ -336,7 +301,7 @@ Expected:
 7. Restore mains input to the UPS.
 8. UPS output returns after the configured on-delay.
 9. NAS boots.
-10. DSM sends the UPS-connected notification after the UPS stack starts.
+10. DSM sends the UPS-connected notification after the UPS stack starts (if configured).
 11. Run `make check` again.
 
 If the check reports a problem, use [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
