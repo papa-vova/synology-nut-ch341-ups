@@ -26,7 +26,6 @@ WORK_DIR ?= .work/build
 
 help:
 	@printf '%s\n' 'Targets:'
-	@printf '  %-12s %s\n' 'selfcheck' 'run local repository checks'
 	@printf '  %-12s %s\n' 'deps' 'download configured Synology build dependencies'
 	@printf '  %-12s %s\n' 'build' 'build CH341 kernel module'
 	@printf '  %-12s %s\n' 'bootstrap' 'prepare DSM permissions'

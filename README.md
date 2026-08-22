@@ -207,28 +207,13 @@ make install WAIT_SECONDS=900 UPS_OFF_DELAY_SECONDS=300 UPS_ON_DELAY_SECONDS=180
 
 ### Check
 
-#### Commands
-
-There are two checks:
-
-| Command | Runs where | Purpose |
-| --- | --- | --- |
-| `make selfcheck` | local Linux/WSL host | Validate dependency config, shell syntax, and Makefile wiring. No downloads, no NAS access. |
-| `make check` | local host plus SSH to NAS | Verify the installed DSM runtime: module, TTY, NUT processes, DSM services/timers, DSM UPS settings, and live UPS status. |
-
-```sh
-make selfcheck
-```
-
 ```sh
 make check
 ```
 
-Run `make check` after install, after DSM updates, after NAS reboots, and before/after power-loss tests. It confirms that DSM still sees the serial UPS and that the shutdown watchdog is armed before relying on the setup.
+`make check` is a manual DSM runtime health report over SSH. Ongoing monitoring is handled by the DSM healthcheck timer installed on the NAS.
 
-#### Coverage
-
-The check verifies:
+It verifies:
 
 - installed healthcheck result
 - CH341 kernel module and `/dev/ttyUSB*`
@@ -237,9 +222,7 @@ The check verifies:
 - DSM UPS wait time and output-shutdown setting
 - live DSM and NUT UPS status
 
-#### Success
-
-Final success line:
+Expected final line:
 
 ```text
 UPS monitoring: PASS
