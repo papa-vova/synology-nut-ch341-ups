@@ -440,12 +440,13 @@ schedule_ups_output_cut() {
 	touch "\$SHUTDOWN_SENT"
 	log "Scheduling UPS shutdown-return before DSM enters Safe Mode"
 	"\$STACK_SCRIPT" start || log "Could not refresh serial UPS stack before shutdown-return command"
+if ups_output_shutdown_enabled; then
 	if /usr/bin/timeout 25 "\$SYNOUPS" shutdownups; then
 		log "Synology UPS shutdown-return command completed"
 		return 0
 	fi
 	log "Synology UPS shutdown-return command failed; trying upsdrvctl shutdown fallback"
-	/usr/bin/timeout 25 /usr/bin/upsdrvctl -u root shutdown || log "upsdrvctl shutdown fallback failed"
+		/usr/bin/timeout 25 /usr/bin/upsdrvctl -u root shutdown || log "UPS watchdog: upsdrvctl shutdown fallback failed"
 }
 
 case "\${1:-}" in
@@ -489,7 +490,8 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/syno/bin:/usr/syno/sbin
 
 STACK_SCRIPT="$STACK_SCRIPT"
 UPS_NAME="$UPS_NAME"
-WAIT_SECONDS="$WAIT_SECONDS"
+DEFAULT_WAIT_SECONDS="$WAIT_SECONDS"
+SYNOUPS_CONF="$SYNOUPS_CONF"
 SYNOUPS="/usr/syno/bin/synoups"
 STATE_DIR="/run/ch341-ups-watchdog"
 ONBATT_STAMP="\$STATE_DIR/onbattery.since"
@@ -500,10 +502,38 @@ log() {
 	logger -p user.err -t "\$LOG_TAG" "\$*"
 }
 
+configured_wait_seconds() {
+	value="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_wait_time 2>/dev/null || true)"
+	case "\$value" in
+		""|*[!0-9]*)
+			printf "%s\\n" "\$DEFAULT_WAIT_SECONDS"
+			;;
+		*)
+			printf "%s\\n" "\$value"
+			;;
+	esac
+}
+
+ups_support_enabled() {
+	value="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_enabled 2>/dev/null || true)"
+	[ "\$value" = "yes" ]
+}
+
+ups_output_shutdown_enabled() {
+	value="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_safeshutdown 2>/dev/null || true)"
+	[ "\$value" = "yes" ]
+}
+
 mkdir -p "\$STATE_DIR"
 
 status="\$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || true)"
 now="\$(date +%s)"
+
+if ! ups_support_enabled; then
+	log "DSM UPS support is disabled; watchdog inactive"
+	rm -f "\$ONBATT_STAMP" "\$SHUTDOWN_SENT"
+	exit 0
+fi
 
 case "\$status" in
 	*OB*|*LB*)
@@ -529,7 +559,8 @@ esac
 since="\$(cat "\$ONBATT_STAMP" 2>/dev/null || echo "\$now")"
 elapsed=\$((now - since))
 
-if [ "\$elapsed" -lt "\$WAIT_SECONDS" ]; then
+wait_seconds="\$(configured_wait_seconds)"
+if [ "\$elapsed" -lt "\$wait_seconds" ]; then
 	exit 0
 fi
 
@@ -538,15 +569,19 @@ if [ -e "\$SHUTDOWN_SENT" ]; then
 fi
 
 touch "\$SHUTDOWN_SENT"
-log "UPS watchdog battery timer reached \${elapsed}s; scheduling UPS shutdown-return and DSM Safe Mode"
+log "UPS watchdog battery timer reached \${elapsed}s (configured wait \${wait_seconds}s); scheduling UPS shutdown-return and DSM Safe Mode"
 
 "\$STACK_SCRIPT" start || log "UPS watchdog could not refresh serial UPS stack before shutdown-return command"
 
-if /usr/bin/timeout 25 "\$SYNOUPS" shutdownups; then
-	log "UPS watchdog: Synology UPS shutdown-return command completed"
+if ups_output_shutdown_enabled; then
+	if /usr/bin/timeout 25 "\$SYNOUPS" shutdownups; then
+		log "UPS watchdog: Synology UPS shutdown-return command completed"
+	else
+		log "UPS watchdog: Synology UPS shutdown-return failed; trying upsdrvctl shutdown fallback"
+		/usr/bin/timeout 25 /usr/bin/upsdrvctl -u root shutdown || log "UPS watchdog: upsdrvctl shutdown fallback failed"
+	fi
 else
-	log "UPS watchdog: Synology UPS shutdown-return failed; trying upsdrvctl shutdown fallback"
-	/usr/bin/timeout 25 /usr/bin/upsdrvctl -u root shutdown || log "UPS watchdog: upsdrvctl shutdown fallback failed"
+	log "DSM UPS output shutdown is disabled; skipping UPS output cut"
 fi
 
 "\$SYNOUPS" lowbatt || log "UPS watchdog: Synology lowbatt Safe Mode command failed"
@@ -679,10 +714,19 @@ check_once() {
 	grep -Fq "NOTIFYCMD /usr/sbin/upssched" "\$UPSMON_CONF" 2>/dev/null || append_issue "upsmon is not configured to invoke upssched"
 	grep -Fq "NOTIFYFLAG ONBATT SYSLOG+WALL+EXEC" "\$UPSMON_CONF" 2>/dev/null || append_issue "upsmon ONBATT notification does not execute commands"
 	grep -Fq "CMDSCRIPT \$UPSSCHED_CMD_SCRIPT" "\$UPSSCHED_CONF" 2>/dev/null || append_issue "upssched is not using \$UPSSCHED_CMD_SCRIPT"
+	conf_enabled="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_enabled 2>/dev/null || true)"
+	[ "\$conf_enabled" = "yes" ] || append_issue "DSM UPS support is \${conf_enabled:-empty}, expected yes"
+	conf_mode="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_mode 2>/dev/null || true)"
+	[ "\$conf_mode" = "usb" ] || append_issue "DSM UPS mode is \${conf_mode:-empty}, expected usb"
 	conf_wait="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_wait_time 2>/dev/null || true)"
-	[ "\$conf_wait" = "\$WAIT_SECONDS" ] || append_issue "DSM UPS wait time is \$conf_wait, expected \$WAIT_SECONDS"
+	case "\$conf_wait" in
+		""|*[!0-9]*) append_issue "DSM UPS wait time is not numeric: \${conf_wait:-empty}" ;;
+	esac
 	conf_safe="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_safeshutdown 2>/dev/null || true)"
-	[ "\$conf_safe" = "\$SHUTDOWN_UPS" ] || append_issue "DSM UPS safe-shutdown flag is \$conf_safe, expected \$SHUTDOWN_UPS"
+	case "\$conf_safe" in
+		yes|no) ;;
+		*) append_issue "DSM UPS output-shutdown flag is not yes/no: \${conf_safe:-empty}" ;;
+	esac
 	lsmod | grep -q '^ch341 ' || append_issue "ch341 module is not loaded"
 	ls /dev/ttyUSB* >/dev/null 2>&1 || append_issue "no /dev/ttyUSB* device exists"
 	systemctl is-active --quiet ups-usb.service || append_issue "ups-usb.service is not active"
@@ -723,6 +767,12 @@ if check_once; then
 fi
 
 now="\$(date +%s)"
+
+if ! ups_support_enabled; then
+	log "DSM UPS support is disabled; watchdog inactive"
+	rm -f "\$ONBATT_STAMP" "\$SHUTDOWN_SENT"
+	exit 0
+fi
 last="0"
 [ -f "\$LAST_NOTIFY" ] && last="\$(cat "\$LAST_NOTIFY" 2>/dev/null || echo 0)"
 age=\$((now - last))

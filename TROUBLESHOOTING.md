@@ -1,16 +1,17 @@
 # Troubleshooting
 
-Start with:
+Commands below assume the README target variables are set:
 
 ```sh
-./scripts/check-over-ssh.sh admin@nas
+DSM_USER=admin
+NAS="$DSM_USER@nas"
 ```
 
-If it reports `NOT OK`, collect NAS-side details:
+If the check script reports `FAIL`, collect NAS-side details:
 
 ```sh
-ssh admin@nas "sudo /usr/local/sbin/synology-ch341-ups-install.sh status"
-ssh admin@nas "journalctl -u ch341-ups-watchdog.service -u ups-usb.service --since '30 minutes ago' --no-pager"
+ssh "$NAS" "sudo /usr/local/sbin/synology-ch341-ups-install.sh status"
+ssh "$NAS" "journalctl -u ch341-ups-watchdog.service -u ups-usb.service --since '30 minutes ago' --no-pager"
 ```
 
 ## DSM shows no USB UPS
@@ -18,8 +19,8 @@ ssh admin@nas "journalctl -u ch341-ups-watchdog.service -u ups-usb.service --sin
 Confirm the USB ID:
 
 ```sh
-scp scripts/probe-nas-ups.sh admin@nas:/tmp/
-ssh admin@nas "sudo /bin/sh /tmp/probe-nas-ups.sh"
+scp scripts/probe-nas-ups.sh "${NAS}:/tmp/"
+ssh "$NAS" "sudo /bin/sh /tmp/probe-nas-ups.sh"
 ```
 
 If the UPS shows `1a86:7523`, DSM sees USB electrically, but the device is a CH341 serial bridge rather than HID.
@@ -33,7 +34,7 @@ lsmod | grep -E '^(ch341|usbserial)'
 dmesg | grep -iE 'ch341|ttyUSB|1a86|7523|usbserial' | tail -n 80
 ```
 
-If `ch341.ko` does not load after a DSM update, rebuild it for the new DSM kernel and run `./scripts/deploy-over-ssh.sh admin@nas`.
+If `ch341.ko` does not load after a DSM update, rebuild it for the new DSM kernel and run the deploy script.
 
 ## UPS status stays `OL` while mains is cut
 
