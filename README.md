@@ -159,9 +159,11 @@ solution parameters; it replaces this repository's sudoers file with the current
 rule:
 
 ```sh
-ssh "$DSM_USER@$NAS" "sudo /bin/sh -se -- '$DSM_USER'" <<'EOF'
+setup_script="/tmp/synology-nut-ch341-ups-sudoers-setup.$$.sh"
+ssh "$DSM_USER@$NAS" "cat > '$setup_script' && chmod 700 '$setup_script'" <<'EOF'
 set -eu
 DSM_USER="$1"
+SETUP_SCRIPT="$2"
 
 case "$DSM_USER" in
 	""|*[!A-Za-z0-9._-]*)
@@ -180,7 +182,10 @@ EORULE
 chmod 0440 "$tmp"
 mv "$tmp" "$sudoers"
 chmod 0440 "$sudoers"
+rm -f "$SETUP_SCRIPT"
 EOF
+
+ssh -tt "$DSM_USER@$NAS" "sudo /bin/sh '$setup_script' '$DSM_USER' '$setup_script'; rc=\$?; rm -f '$setup_script'; exit \$rc"
 ```
 
 Then test the installed rule with an actual passwordless sudo command. This
