@@ -1,29 +1,43 @@
 # Troubleshooting
 
-## DSM shows no USB UPS
-
-Check that the UPS is not presenting as HID:
+Start with:
 
 ```sh
-lsusb
+./scripts/check-over-ssh.sh admin@nas
 ```
 
-If it shows `1a86:7523`, DSM sees USB electrically, but the device is a CH341 serial bridge. This setup is intended for that case.
+If it reports `NOT OK`, collect NAS-side details:
+
+```sh
+ssh admin@nas "sudo /usr/local/sbin/synology-ch341-ups-install.sh status"
+ssh admin@nas "journalctl -u ch341-ups-watchdog.service -u ups-usb.service --since '30 minutes ago' --no-pager"
+```
+
+## DSM shows no USB UPS
+
+Confirm the USB ID:
+
+```sh
+scp scripts/probe-nas-ups.sh admin@nas:/tmp/
+ssh admin@nas "sudo /bin/sh /tmp/probe-nas-ups.sh"
+```
+
+If the UPS shows `1a86:7523`, DSM sees USB electrically, but the device is a CH341 serial bridge rather than HID.
 
 ## No `/dev/ttyUSB0`
 
-Check the module:
+Run on the NAS:
 
 ```sh
 lsmod | grep -E '^(ch341|usbserial)'
 dmesg | grep -iE 'ch341|ttyUSB|1a86|7523|usbserial' | tail -n 80
 ```
 
-If `ch341.ko` does not load after a DSM update, rebuild it against the matching Synology GPL source/toolchain for the new kernel.
+If `ch341.ko` does not load after a DSM update, rebuild it for the new DSM kernel and run `./scripts/deploy-over-ssh.sh admin@nas`.
 
 ## UPS status stays `OL` while mains is cut
 
-The NAS only reacts to the status reported by the UPS through NUT. Run:
+Run on the NAS while the UPS is on battery:
 
 ```sh
 /usr/bin/upsc ups@localhost ups.status
@@ -31,7 +45,7 @@ The NAS only reacts to the status reported by the UPS through NUT. Run:
 /usr/bin/upsc ups@localhost battery.voltage
 ```
 
-If status remains `OL` while the UPS is physically on battery, the UPS firmware/driver protocol is not reporting battery mode correctly.
+If status remains `OL`, the UPS firmware or selected protocol is not reporting battery mode correctly.
 
 ## DSM does not shut down after the timer
 
@@ -43,26 +57,13 @@ systemctl status ch341-ups-watchdog.service --no-pager
 journalctl -u ch341-ups-watchdog.service --since "30 minutes ago" --no-pager
 ```
 
-The watchdog is the root-owned process responsible for the fixed battery timer.
-
 ## UPS does not cut output
 
-Check whether the UPS exposes shutdown delay parameters:
+Check whether the driver has shutdown-delay parameters:
 
 ```sh
 /usr/bin/upsc ups@localhost driver.parameter.offdelay
 /usr/bin/upsc ups@localhost driver.parameter.ondelay
 ```
 
-The driver sends the shutdown-return command through DSM/NUT. Some UPS firmware may ignore or partially implement that command.
-
-## Notifications stop after a DSM update
-
-Run:
-
-```sh
-/usr/local/sbin/ch341-ups-healthcheck.sh; echo rc=$?
-systemctl status ch341-ups-healthcheck.timer --no-pager
-```
-
-The healthcheck tries one automatic service restart. If the setup remains broken, it sends a DSM notification to administrators with email delivery requested.
+Some UPS firmware may ignore the Megatec/Qx shutdown-return command.
