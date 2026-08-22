@@ -20,7 +20,7 @@ The setup stays as close as practical to stock DSM:
 - The added kernel module only creates `/dev/ttyUSB*` for the CH341 bridge.
 - A DSM service drop-in points the stock UPS USB service at the serial-aware startup path.
 - A watchdog timer runs the DSM-configured power-loss decision loop shown below.
-- A healthcheck timer verifies the installed setup after boot and after DSM updates. It notifies DSM administrators if monitoring breaks, but it is not part of the power-loss sequence.
+- A healthcheck timer verifies the installed setup after boot and after DSM updates. It uses DSM's stock Power supply events for user-visible notifications, but it is not part of the power-loss sequence.
 
 ### Build/Deploy Path
 
@@ -47,7 +47,8 @@ The setup stays as close as practical to stock DSM:
 
 - The healthcheck is also a DSM systemd timer, not a separate always-running process.
 - `ch341-ups-healthcheck.timer` runs 5 minutes after boot and every 15 minutes after that. It checks the module, TTY, DSM service wiring, timers, NUT processes, DSM UPS settings, and live UPS status as shown in the monitoring sequence.
-- It sends one healthy-after-boot notification by default, sends problem notifications if monitoring breaks, and sends a recovery notification when monitoring becomes healthy again.
+- A successful UPS stack start emits DSM's stock `The UPS has been connected` event, including after boot.
+- If monitoring is still unavailable after an automatic restart attempt, the healthcheck emits DSM's stock `The UPS has been disconnected` event and logs the diagnostic details.
 
 ### Outage Sequence
 
@@ -93,13 +94,13 @@ sequenceDiagram
   D-->>H: starts timer after boot
   H-->>D: checks module, tty, services, timers, settings, UPS status
   alt monitoring healthy
-    H-->>D: send one healthy-after-boot notification by default
+    H-->>D: log healthy status
   else monitoring broken
     H-->>D: restart UPS service and recheck
     alt recovered
-      H-->>D: send recovery notification
+      H-->>D: log recovered status
     else still broken
-      H-->>D: notify administrators
+      H-->>D: emit stock UPS disconnected event and log diagnostic details
     end
   end
 ```
@@ -110,7 +111,7 @@ sequenceDiagram
 
 Run the Make targets on a Linux host, including WSL on Windows. The NAS does not need this repository, the Synology source archive, or the toolchain. Deployment uses SSH and copies only the installer and built module to the NAS.
 
-#### Parameters
+#### Solution Parameters
 
 Set local parameters:
 
@@ -122,16 +123,13 @@ export UPS_OFF_DELAY_SECONDS=300
 export UPS_ON_DELAY_SECONDS=180
 ```
 
-- `NAS` is the NAS SSH host or host alias used by `install`, `check`, and
-  `probe`.
-- `DSM_USER` is the DSM account used for SSH and sudo.
-- `SSH_TARGET` is the full SSH target used internally by the Makefile.
-  Default: `$DSM_USER@$NAS`. Override it only if SSH must use a different target
-  string than the DSM account being authorized.
+- `NAS` is only the NAS hostname or SSH host alias used by `install`, `check`,
+  and `probe`.
+- `DSM_USER` is the DSM account used for SSH login and sudo authorization.
+- `SSH_TARGET` is the full SSH destination used internally by the Makefile.
+  Default: `$DSM_USER@$NAS`.
 - `WAIT_SECONDS` is only the initial DSM UPS wait time written during install. Later UI changes are respected.
 - `UPS_OFF_DELAY_SECONDS` and `UPS_ON_DELAY_SECONDS` configure UPS output cutoff/restore delays.
-- `HEALTH_NOTIFY_OK_ON_BOOT` controls the DSM success notification after the first healthy timer run after boot. Default: `yes`.
-  - To disable that notification after install, rerun `make install HEALTH_NOTIFY_OK_ON_BOOT=no`. No module rebuild is needed.
 - `SCP` is the file-copy command used by `install` and `probe`.
   Default: `scp -O`, which uses legacy SCP mode for Synology systems without
   an SFTP subsystem.
@@ -145,10 +143,11 @@ export UPS_ON_DELAY_SECONDS=180
 
 The Makefile and scripts document the exact variables they accept.
 
-#### Mandatory Configuration
+#### Passwordless Access Configuration (Mandatory)
 
-The install flow is designed to run unattended. Configure SSH and DSM sudo first;
-interactive password prompts are not supported by the documented flow.
+The install flow is intentionally noninteractive. Configure SSH, DSM sudo, and
+DSM notification delivery before running `make install`; interactive password
+prompts are not part of the documented flow.
 
 ##### SSH Authentication
 
@@ -163,32 +162,42 @@ Configure SSH so the local build machine can connect to DSM without prompts:
 This command must exit without any prompt:
 
 ```sh
-ssh -o BatchMode=yes "${SSH_TARGET:-$DSM_USER@$NAS}" true
+ssh -o BatchMode=yes "$DSM_USER@$NAS" true
 ```
 
 ##### DSM Sudo
 
-The DSM account must be allowed to run the install/check/probe commands through
-sudo without a password. Add this sudoers rule on DSM before running the install,
-replacing `admin` with the value of `DSM_USER`:
-
-```text
-admin ALL=(root) NOPASSWD: /bin/sh /tmp/synology-ch341-ups-install.sh install *, /usr/local/sbin/ch341-ups-healthcheck.sh, /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_wait_time, /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_safeshutdown, /usr/syno/bin/synoups status, /bin/sh /tmp/probe-nas-ups.sh
-```
-
-Put the rule in a file under `/etc/sudoers.d/`, keep it mode `0440`, and validate
-it with `visudo` if DSM provides it. The account must be a DSM administrator or
-otherwise allowed by DSM sudo policy.
-
-##### Unattended Run
-
-After SSH and initial sudo are noninteractive, an unattended runner can execute:
+The DSM account must be allowed to run this repository's install/check/probe
+commands through sudo without a password. Run this once after setting the
+solution parameters; it replaces this repository's sudoers file with the current
+rule and validates the result:
 
 ```sh
-make deps
-make build
-make install
-make check
+ssh "$DSM_USER@$NAS" "sudo /bin/sh -se -- '$DSM_USER'" <<'EOF'
+set -eu
+DSM_USER="$1"
+
+sudoers=/etc/sudoers.d/synology-nut-ch341-ups
+tmp="${sudoers}.tmp"
+
+cat > "$tmp" <<EORULE
+$DSM_USER ALL=(root) NOPASSWD: /bin/true, /bin/sh /tmp/synology-ch341-ups-install.sh *, /usr/local/sbin/ch341-ups-healthcheck.sh, /usr/local/sbin/ch341-ups.sh status, /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_wait_time, /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_safeshutdown, /usr/syno/bin/synoups status, /bin/sh /tmp/probe-nas-ups.sh
+EORULE
+
+chmod 0440 "$tmp"
+if command -v visudo >/dev/null 2>&1; then
+	visudo -cf "$tmp"
+fi
+mv "$tmp" "$sudoers"
+chmod 0440 "$sudoers"
+sudo -n -l -U "$DSM_USER" | grep -F '/tmp/synology-ch341-ups-install.sh' >/dev/null
+EOF
+```
+
+After that, this command must exit without a password prompt:
+
+```sh
+ssh "$DSM_USER@$NAS" sudo -n /bin/true
 ```
 
 #### DSM Settings
@@ -196,7 +205,42 @@ make check
 Set general DSM options:
 
 - Control Panel -> Hardware & Power -> General: enable `Restart automatically when power supply issue is fixed`.
-- Control Panel -> Notification -> Email: configure email delivery if email alerts are required.
+- Control Panel -> Notification -> Email: configure and test email delivery.
+
+##### DSM Notification Rule
+
+DSM decides which stock events are sent by email from Control Panel notification
+rules. Before relying on remote UPS alerts, configure the email-enabled rule:
+
+1. Open Control Panel -> Notification -> Rules.
+2. Select the rule that has your email address in the Email column, for example
+   `default`, and click Edit.
+3. Expand Power System or Power supply.
+4. Tick all five UPS events:
+   - Info: `The UPS has been connected`
+   - Critical: `The UPS has been disconnected`
+   - Warning: `The UPS has entered battery mode`
+   - Warning: `The UPS has reached low battery`
+   - Info: `The UPS has returned to AC mode`
+5. Save the rule and click Apply.
+
+The two Info events are mandatory for positive remote assurance. Without them,
+DSM can still warn about battery or disconnect events, but it will not email the
+successful boot/start event or the return-to-AC event.
+
+The installer uses DSM's stock UPS notification path for these events:
+
+| DSM event | When this repository causes or relies on it |
+| --- | --- |
+| `The UPS has been connected` | Emitted after a successful UPS stack start, including after boot. |
+| `The UPS has been disconnected` | Emitted on UPS USB removal and when the healthcheck still cannot reach the UPS after an automatic restart attempt. |
+| `The UPS has entered battery mode` | Emitted by DSM/NUT when the UPS reports battery mode. |
+| `The UPS has reached low battery` | Emitted by DSM/NUT when the UPS reports low battery or forced shutdown. |
+| `The UPS has returned to AC mode` | Emitted by DSM/NUT when mains power returns. |
+
+The installer does not change DSM Notification Rule membership. Configure these
+checkboxes in DSM UI; the installer always emits the stock UPS events, and DSM
+rules decide which delivery channels receive them.
 
 UPS options after install:
 
@@ -208,7 +252,7 @@ UPS options after install:
 
 The watchdog reads DSM's UPS wait time and UPS-output-shutdown setting at runtime. Changing those two UI settings does not require reinstalling.
 
-### Build
+### Build And Install
 
 Inspect `dependencies.env` first. It declares the Synology kernel source archive, toolchain archive, checksums, and platform name.
 
@@ -226,8 +270,6 @@ make build
 
 For another platform or source set, edit `dependencies.env` or set `DEPS_FILE` to another file with the same variables.
 
-### Install
-
 Install or update the UPS setup:
 
 ```sh
@@ -237,10 +279,12 @@ make install
 Override install parameters when needed:
 
 ```sh
-make install WAIT_SECONDS=900 UPS_OFF_DELAY_SECONDS=300 UPS_ON_DELAY_SECONDS=180 HEALTH_NOTIFY_OK_ON_BOOT=yes
+make install WAIT_SECONDS=900 UPS_OFF_DELAY_SECONDS=300 UPS_ON_DELAY_SECONDS=180
 ```
 
-### Check
+### Testing
+
+#### Check
 
 ```sh
 make check
@@ -254,6 +298,7 @@ It verifies:
 - CH341 kernel module and `/dev/ttyUSB*`
 - NUT driver, server, and monitor processes
 - DSM UPS services and timers
+- installed DSM/NUT event wiring for the five stock UPS events
 - DSM UPS wait time and output-shutdown setting
 - live DSM and NUT UPS status
 
@@ -263,7 +308,8 @@ Expected final line:
 UPS monitoring: PASS
 ```
 
-### Test
+`make check` cannot verify DSM Notification Rule checkboxes. Confirm those in
+Control Panel -> Notification -> Rules before relying on email delivery.
 
 #### Short Detection
 
@@ -276,7 +322,7 @@ UPS monitoring: PASS
 Expected:
 
 - DSM sends a battery-mode notification.
-- DSM sends or logs mains-restored status after power returns.
+- DSM sends the return-to-AC notification after power returns.
 - NAS remains online.
 
 #### Full Shutdown
@@ -290,6 +336,7 @@ Expected:
 7. Restore mains input to the UPS.
 8. UPS output returns after the configured on-delay.
 9. NAS boots.
-10. Run `make check` again.
+10. DSM sends the UPS-connected notification after the UPS stack starts.
+11. Run `make check` again.
 
 If the check reports a problem, use [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
