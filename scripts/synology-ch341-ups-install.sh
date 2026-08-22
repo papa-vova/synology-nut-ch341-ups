@@ -487,7 +487,6 @@ STACK_SCRIPT="$STACK_SCRIPT"
 UPS_NAME="$UPS_NAME"
 SYNOUPS_CONF="$SYNOUPS_CONF"
 SYNOUPS="/usr/syno/bin/synoups"
-BATTERY_NOTIFY="/usr/syno/bin/synoups_battery_notify.sh"
 LOG_TAG="ch341-ups"
 SHUTDOWN_SENT="/run/ch341-ups-shutdown-return.sent"
 
@@ -535,11 +534,7 @@ schedule_ups_output_cut() {
 
 case "\${1:-}" in
 	onbatt)
-		if [ -x "\$BATTERY_NOTIFY" ]; then
-			"\$BATTERY_NOTIFY" || log "Battery notification script failed"
-		else
-			pass_to_synology onbatt
-		fi
+		pass_to_synology onbatt
 		;;
 	online|nocomm|fsd)
 		[ "\$1" = "online" ] && rm -f "\$SHUTDOWN_SENT"
