@@ -22,7 +22,7 @@ WORK_DIR ?= .work/build
 
 .DEFAULT_GOAL := help
 
-.PHONY: help require-nas require-module selfcheck deps build bootstrap install check probe
+.PHONY: help require-nas require-module deps build bootstrap install check probe
 
 help:
 	@printf '%s\n' 'Targets:'
@@ -38,9 +38,6 @@ require-nas:
 
 require-module:
 	@test -f "$(MODULE)" || { printf 'ERROR: missing module: %s\n' "$(MODULE)" >&2; exit 1; }
-
-selfcheck:
-	DEPS_FILE="$(DEPS_FILE)" ./scripts/selfcheck.sh
 
 deps:
 	DEPS_FILE="$(DEPS_FILE)" WORK_DIR="$(WORK_DIR)" ./scripts/fetch-build-deps.sh
