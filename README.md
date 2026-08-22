@@ -40,18 +40,16 @@ The setup stays as close as practical to stock DSM:
 #### Watchdog
 
 - The watchdog is a DSM systemd timer, not a separate always-running process.
-- It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby shutdown path shown below.
+- It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby shutdown path shown in the outage sequence.
 - It reads DSM's UPS wait time and UPS-output-shutdown setting at runtime, so UI changes are used without reinstalling.
 
 #### Healthcheck
 
 - The healthcheck is also a DSM systemd timer, not a separate always-running process.
-- `ch341-ups-healthcheck.timer` runs 5 minutes after boot and every 15 minutes after that. It checks the module, TTY, DSM service wiring, timers, NUT processes, DSM UPS settings, and live UPS status. It sends DSM notifications through DSM's notification command.
+- `ch341-ups-healthcheck.timer` runs 5 minutes after boot and every 15 minutes after that. It checks the module, TTY, DSM service wiring, timers, NUT processes, DSM UPS settings, and live UPS status as shown in the monitoring sequence.
 - It sends one healthy-after-boot notification by default, sends problem notifications if monitoring breaks, and sends a recovery notification when monitoring becomes healthy again.
 
-### Sequence
-
-This diagram shows the outage-control path. Healthcheck runs around it as monitoring, not as a shutdown participant.
+### Outage Sequence
 
 ```mermaid
 sequenceDiagram
@@ -81,6 +79,28 @@ sequenceDiagram
     D->>D: boot and start UPS services
     D-->>W: expose current UPS status
     W->>W: verify monitoring and clear outage state
+  end
+```
+
+### Monitoring Sequence
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant D as dsm
+  participant H as healthcheck
+
+  D-->>H: starts timer after boot
+  H-->>D: checks module, tty, services, timers, settings, UPS status
+  alt monitoring healthy
+    H-->>D: send one healthy-after-boot notification by default
+  else monitoring broken
+    H-->>D: restart UPS service and recheck
+    alt recovered
+      H-->>D: send recovery notification
+    else still broken
+      H-->>D: notify administrators
+    end
   end
 ```
 
