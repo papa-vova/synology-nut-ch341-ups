@@ -19,9 +19,8 @@ The setup stays as close as practical to stock DSM:
 - DSM's own `nutdrv_qx`, `upsd`, `upsmon`, `upssched`, and `synoups` are used.
 - The added kernel module only creates `/dev/ttyUSB*` for the CH341 bridge.
 - A DSM service drop-in points the stock UPS USB service at the serial-aware startup path.
-- A watchdog timer runs the DSM-configured power-loss decision loop.
-- A healthcheck timer verifies the setup after boot and after DSM updates, then notifies DSM administrators if it breaks.
-- The first healthy healthcheck-timer run after each boot sends a DSM notification to `@administrators` by default. Set `HEALTH_NOTIFY_OK_ON_BOOT=no` to suppress it.
+- A watchdog timer runs the DSM-configured power-loss decision loop shown below.
+- A healthcheck timer verifies the installed setup after boot and after DSM updates. It notifies DSM administrators if monitoring breaks, but it is not part of the power-loss sequence.
 
 ### Build/Deploy Path
 
@@ -33,14 +32,26 @@ The setup stays as close as practical to stock DSM:
 
 ### DSM Runtime
 
+#### Boot Hook
+
 - `ch341-ups.service` is enabled under `syno-bootup-done.target`; it restarts DSM's `ups-usb.service` after DSM finishes booting.
 - The `ups-usb.service` drop-in starts DSM's stock NUT processes through the serial-aware wrapper.
+
+#### Watchdog
+
 - The watchdog is a DSM systemd timer, not a separate always-running process.
 - It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby shutdown path shown below.
 - It reads DSM's UPS wait time and UPS-output-shutdown setting at runtime, so UI changes are used without reinstalling.
+
+#### Healthcheck
+
+- The healthcheck is also a DSM systemd timer, not a separate always-running process.
 - `ch341-ups-healthcheck.timer` runs 5 minutes after boot and every 15 minutes after that. It checks the module, TTY, DSM service wiring, timers, NUT processes, DSM UPS settings, and live UPS status. It sends DSM notifications through DSM's notification command.
+- It sends one healthy-after-boot notification by default, sends problem notifications if monitoring breaks, and sends a recovery notification when monitoring becomes healthy again.
 
 ### Sequence
+
+This diagram shows the outage-control path. Healthcheck runs around it as monitoring, not as a shutdown participant.
 
 ```mermaid
 sequenceDiagram
