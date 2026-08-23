@@ -11,7 +11,7 @@ If `make check` reports `FAIL`, collect NAS-side details:
 
 ```sh
 ssh "$NAS" "sudo /usr/local/sbin/synology-ch341-ups-install.sh status"
-ssh "$NAS" "journalctl -u ch341-ups-watchdog.service -u ups-usb.service --since '30 minutes ago' --no-pager"
+ssh "$NAS" "journalctl -u ch341-ups-watchdog.service -u ch341-ups-output-shutdown.service -u ups-usb.service --since '30 minutes ago' --no-pager"
 ```
 
 ## DSM shows no USB UPS
@@ -66,7 +66,17 @@ Check whether the driver has shutdown-delay parameters:
 /usr/bin/upsc ups@localhost driver.parameter.ondelay
 ```
 
-Some UPS firmware may ignore the Megatec/Qx shutdown-return command.
+Then check whether the helper attempted the standard NUT shutdown command:
+
+```sh
+systemctl status ch341-ups-output-shutdown.service --no-pager
+journalctl -u ch341-ups-output-shutdown.service --since "30 minutes ago" --no-pager
+grep -iE 'upsdrvctl shutdown|shutdown.return|Shutdown failed|output shutdown' /var/log/messages /var/log/systemd/ch341-ups-output-shutdown.service.log
+```
+
+Some UPS firmware may ignore the Megatec/Qx shutdown-return command. In that
+case DSM can still enter Safe/Standby Mode, but the UPS output-cut step will be
+best-effort and the helper logs should show the failed command attempt.
 
 ## NAS loses power after mains returns
 
@@ -74,10 +84,9 @@ If the NAS enters Safe/Standby Mode and then loses power a few minutes after AC
 returns, check whether a shutdown-return command had already been sent:
 
 ```sh
-grep -iE 'shutdownups|shutdown-return|safe shutdown|watchdog|online|ups.status' /var/log/ups.log /var/log/messages
+grep -iE 'output shutdown|upsdrvctl shutdown|shutdown.return|safe shutdown|watchdog|online|ups.status' /var/log/ups.log /var/log/messages /var/log/systemd/ch341-ups-output-shutdown.service.log
 ```
 
-With the current install, the watchdog must log that it is requesting DSM Safe
-Mode without pre-arming UPS output shutdown. `synoups shutdownups` should only
-appear from `ch341-safe-shutdown.sh`, and only while live UPS status is still
-`OB` or `LB`.
+The watchdog should request DSM Safe/Standby Mode first. The output-shutdown
+helper should ask NUT to cut UPS output only after DSM's UPS safe-shutdown
+target is active and live UPS status is still `OB` or `LB`.

@@ -20,8 +20,8 @@ set -eu
 #
 # Advanced install path overrides:
 #   STACK_SCRIPT, HEALTH_SCRIPT, SAFE_SHUTDOWN_SCRIPT, UPSSCHED_CMD_SCRIPT
-#   WATCHDOG_SCRIPT, STACK_UNIT, HEALTH_SERVICE, HEALTH_TIMER
-#   WATCHDOG_SERVICE, WATCHDOG_TIMER, SAFE_SHUTDOWN_DROPIN_DIR
+#   OUTPUT_SHUTDOWN_SCRIPT, WATCHDOG_SCRIPT, STACK_UNIT, HEALTH_SERVICE, HEALTH_TIMER
+#   OUTPUT_SHUTDOWN_SERVICE, WATCHDOG_SERVICE, WATCHDOG_TIMER, SAFE_SHUTDOWN_DROPIN_DIR
 #   UPS_USB_DROPIN_DIR, UDEV_RULE, FORCE_RESTART_FILE
 #
 # Normal installs should not override advanced paths.
@@ -35,10 +35,12 @@ STACK_SCRIPT="${STACK_SCRIPT:-/usr/local/sbin/ch341-ups.sh}"
 HEALTH_SCRIPT="${HEALTH_SCRIPT:-/usr/local/sbin/ch341-ups-healthcheck.sh}"
 SAFE_SHUTDOWN_SCRIPT="${SAFE_SHUTDOWN_SCRIPT:-/usr/local/sbin/ch341-safe-shutdown.sh}"
 UPSSCHED_CMD_SCRIPT="${UPSSCHED_CMD_SCRIPT:-/usr/local/sbin/ch341-upssched-cmd.sh}"
+OUTPUT_SHUTDOWN_SCRIPT="${OUTPUT_SHUTDOWN_SCRIPT:-/usr/local/sbin/ch341-ups-output-shutdown.sh}"
 WATCHDOG_SCRIPT="${WATCHDOG_SCRIPT:-/usr/local/sbin/ch341-ups-watchdog.sh}"
 STACK_UNIT="${STACK_UNIT:-/etc/systemd/system/ch341-ups.service}"
 HEALTH_SERVICE="${HEALTH_SERVICE:-/etc/systemd/system/ch341-ups-healthcheck.service}"
 HEALTH_TIMER="${HEALTH_TIMER:-/etc/systemd/system/ch341-ups-healthcheck.timer}"
+OUTPUT_SHUTDOWN_SERVICE="${OUTPUT_SHUTDOWN_SERVICE:-/etc/systemd/system/ch341-ups-output-shutdown.service}"
 WATCHDOG_SERVICE="${WATCHDOG_SERVICE:-/etc/systemd/system/ch341-ups-watchdog.service}"
 WATCHDOG_TIMER="${WATCHDOG_TIMER:-/etc/systemd/system/ch341-ups-watchdog.timer}"
 SAFE_SHUTDOWN_DROPIN_DIR="${SAFE_SHUTDOWN_DROPIN_DIR:-/etc/systemd/system/safe-shutdown.service.d}"
@@ -779,6 +781,136 @@ EOF
 	chmod 755 "$UPSSCHED_CMD_SCRIPT"
 }
 
+write_output_shutdown_script() {
+	mkdir -p "$(dirname "$OUTPUT_SHUTDOWN_SCRIPT")"
+	cat > "$OUTPUT_SHUTDOWN_SCRIPT" <<EOF
+#!/bin/sh
+set -u
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/syno/bin:/usr/syno/sbin
+
+UPS_NAME="$UPS_NAME"
+SYNOUPS_CONF="$SYNOUPS_CONF"
+STACK_SCRIPT="$STACK_SCRIPT"
+SAFE_DOWN_MARKER="/tmp/ups.safedown"
+SAFE_TARGET_TIMEOUT_SECONDS=300
+SHUTDOWN_RETRIES=3
+RETRY_SLEEP_SECONDS=40
+LOG_TAG="ch341-ups"
+
+log() {
+	logger -p user.err -t "\$LOG_TAG" "\$*"
+}
+
+ups_output_shutdown_enabled() {
+	value="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_safeshutdown 2>/dev/null || true)"
+	[ "\$value" = "yes" ]
+}
+
+safe_mode_started() {
+	[ -e "\$SAFE_DOWN_MARKER" ] && return 0
+	/usr/syno/bin/synobootseq --is-safe-shutdown >/dev/null 2>&1 && return 0
+	status="\$(synosystemctl get-active-status safe-shutdown.target 2>/dev/null || true)"
+	[ "\$status" = "active" ]
+}
+
+current_ups_status() {
+	/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || true
+}
+
+is_on_battery() {
+	status="\$(current_ups_status)"
+	case "\$status" in
+		*OB*|*LB*|*FSD*)
+			return 0
+			;;
+	esac
+	log "Skipping UPS output shutdown because current UPS status is: \${status:-empty}"
+	return 1
+}
+
+stop_ups_daemons() {
+	log "Stopping NUT daemons before UPS output shutdown"
+	killall upsmon >/dev/null 2>&1 || true
+	killall upssched >/dev/null 2>&1 || true
+	killall upsd >/dev/null 2>&1 || true
+	/usr/bin/upsdrvctl stop >/dev/null 2>&1 || true
+
+	for _ in 1 2 3; do
+		sleep 3
+		count="\$(ps aux | grep -E '(upsd|upsmon|a ups)' | grep -cv grep)"
+		[ "\$count" -eq 0 ] && return 0
+	done
+	return 0
+}
+
+restart_monitoring_after_failure() {
+	log "UPS output shutdown command failed; restarting UPS monitoring so AC-return recovery can be detected"
+	"\$STACK_SCRIPT" start >/dev/null 2>&1 || log "Could not restart UPS monitoring after output shutdown failure"
+}
+
+wait_for_safe_shutdown_target() {
+	waited=0
+	while [ "\$waited" -lt "\$SAFE_TARGET_TIMEOUT_SECONDS" ]; do
+		status="\$(synosystemctl get-active-status safe-shutdown.target 2>/dev/null || true)"
+		if [ "\$status" = "active" ]; then
+			log "DSM safe-shutdown target is active; UPS output shutdown window is open"
+			return 0
+		fi
+		sleep 5
+		waited=\$((waited + 5))
+	done
+	log "DSM safe-shutdown target did not become active within \${SAFE_TARGET_TIMEOUT_SECONDS}s; refusing to cut UPS output"
+	return 1
+}
+
+if ! ups_output_shutdown_enabled; then
+	log "DSM UPS output shutdown is disabled; output-shutdown helper exiting"
+	exit 0
+fi
+
+waited=0
+while ! safe_mode_started; do
+	if [ "\$waited" -ge 180 ]; then
+		log "DSM Safe/Standby Mode was not detected; refusing to cut UPS output"
+		exit 1
+	fi
+	sleep 5
+	waited=\$((waited + 5))
+done
+
+log "DSM Safe/Standby Mode detected; waiting for DSM safe-shutdown target"
+if ! wait_for_safe_shutdown_target; then
+	exit 1
+fi
+
+if ! is_on_battery; then
+	exit 0
+fi
+
+touch /var/.NormalShutdown 2>/dev/null || true
+/usr/syno/bin/syno_scemd_connector --signal 70 >/dev/null 2>&1 || true
+stop_ups_daemons
+
+attempt=1
+while [ "\$attempt" -le "\$SHUTDOWN_RETRIES" ]; do
+	log "Requesting UPS output shutdown through NUT upsdrvctl shutdown (attempt \${attempt}/\${SHUTDOWN_RETRIES})"
+	if /usr/bin/upsdrvctl shutdown; then
+		log "UPS output shutdown command accepted"
+		exit 0
+	fi
+	log "UPS output shutdown command failed on attempt \$attempt"
+	attempt=\$((attempt + 1))
+	[ "\$attempt" -le "\$SHUTDOWN_RETRIES" ] && sleep "\$RETRY_SLEEP_SECONDS"
+done
+
+restart_monitoring_after_failure
+exit 1
+EOF
+	chown root:root "$OUTPUT_SHUTDOWN_SCRIPT" || true
+	chmod 755 "$OUTPUT_SHUTDOWN_SCRIPT"
+}
+
 write_watchdog_script() {
 	mkdir -p "$(dirname "$WATCHDOG_SCRIPT")"
 	cat > "$WATCHDOG_SCRIPT" <<EOF
@@ -792,6 +924,7 @@ DEFAULT_WAIT_SECONDS="$WAIT_SECONDS"
 SYNOUPS_CONF="$SYNOUPS_CONF"
 SYNOUPS="/usr/syno/bin/synoups"
 SYNOPOWEROFF="/usr/syno/sbin/synopoweroff"
+OUTPUT_SHUTDOWN_SERVICE_NAME="$(basename "$OUTPUT_SHUTDOWN_SERVICE")"
 STATE_DIR="/run/ch341-ups-watchdog"
 ONBATT_STAMP="\$STATE_DIR/onbattery.since"
 SAFEMODE_REQUESTED="/run/ch341-ups-safemode.requested"
@@ -816,6 +949,22 @@ configured_wait_seconds() {
 ups_support_enabled() {
 	value="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_enabled 2>/dev/null || true)"
 	[ "\$value" = "yes" ]
+}
+
+is_on_battery() {
+	status="\$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || true)"
+	case "\$status" in
+		*OB*|*LB*|*FSD*)
+			return 0
+			;;
+	esac
+	log "UPS watchdog: current UPS status is not battery mode: \${status:-empty}"
+	return 1
+}
+
+start_output_shutdown_helper() {
+	systemctl reset-failed "\$OUTPUT_SHUTDOWN_SERVICE_NAME" >/dev/null 2>&1 || true
+	systemctl start --no-block "\$OUTPUT_SHUTDOWN_SERVICE_NAME" >/dev/null 2>&1 || log "UPS watchdog: could not start \$OUTPUT_SHUTDOWN_SERVICE_NAME"
 }
 
 mkdir -p "\$STATE_DIR"
@@ -872,6 +1021,7 @@ fi
 
 touch "\$SAFEMODE_REQUESTED"
 log "UPS watchdog battery timer reached \${elapsed}s (configured wait \${wait_seconds}s); requesting DSM Safe Mode through Synology wait-time-expired path"
+start_output_shutdown_helper
 
 if "\$SYNOUPS" waittimeup; then
 	sleep 10
@@ -922,6 +1072,25 @@ EOF
 	chmod 644 "$WATCHDOG_TIMER"
 }
 
+write_output_shutdown_unit() {
+	mkdir -p "$(dirname "$OUTPUT_SHUTDOWN_SERVICE")"
+	cat > "$OUTPUT_SHUTDOWN_SERVICE" <<EOF
+[Unit]
+Description=CH341 UPS output shutdown helper
+DefaultDependencies=no
+IgnoreOnIsolate=yes
+After=ups-usb.service ch341-ups.service
+
+[Service]
+Type=simple
+ExecStart=$OUTPUT_SHUTDOWN_SCRIPT
+KillMode=process
+TimeoutStartSec=0
+EOF
+	chown root:root "$OUTPUT_SHUTDOWN_SERVICE" || true
+	chmod 644 "$OUTPUT_SHUTDOWN_SERVICE"
+}
+
 write_health_script() {
 	mkdir -p "$(dirname "$HEALTH_SCRIPT")"
 	cat > "$HEALTH_SCRIPT" <<EOF
@@ -944,6 +1113,9 @@ HEALTH_TIMER_NAME="$(basename "$HEALTH_TIMER")"
 WATCHDOG_SCRIPT="$WATCHDOG_SCRIPT"
 WATCHDOG_TIMER="$WATCHDOG_TIMER"
 WATCHDOG_TIMER_NAME="$(basename "$WATCHDOG_TIMER")"
+OUTPUT_SHUTDOWN_SCRIPT="$OUTPUT_SHUTDOWN_SCRIPT"
+OUTPUT_SHUTDOWN_SERVICE="$OUTPUT_SHUTDOWN_SERVICE"
+OUTPUT_SHUTDOWN_SERVICE_NAME="$(basename "$OUTPUT_SHUTDOWN_SERVICE")"
 UPS_USB_DROPIN="$UPS_USB_DROPIN"
 SAFE_SHUTDOWN_SCRIPT="$SAFE_SHUTDOWN_SCRIPT"
 SAFE_SHUTDOWN_DROPIN="$SAFE_SHUTDOWN_DROPIN"
@@ -1003,6 +1175,7 @@ check_once() {
 	[ -x "\$STACK_SCRIPT" ] || append_issue "\$STACK_SCRIPT is missing or not executable"
 	[ -x "\$SAFE_SHUTDOWN_SCRIPT" ] || append_issue "\$SAFE_SHUTDOWN_SCRIPT is missing or not executable"
 	[ -x "\$UPSSCHED_CMD_SCRIPT" ] || append_issue "\$UPSSCHED_CMD_SCRIPT is missing or not executable"
+	[ -x "\$OUTPUT_SHUTDOWN_SCRIPT" ] || append_issue "\$OUTPUT_SHUTDOWN_SCRIPT is missing or not executable"
 	[ -x "\$WATCHDOG_SCRIPT" ] || append_issue "\$WATCHDOG_SCRIPT is missing or not executable"
 	[ -f "\$UPS_USB_DROPIN" ] || append_issue "\$UPS_USB_DROPIN is missing"
 	[ -f "\$SAFE_SHUTDOWN_DROPIN" ] || append_issue "\$SAFE_SHUTDOWN_DROPIN is missing"
@@ -1018,6 +1191,10 @@ check_once() {
 	systemctl cat ups-usb.service 2>/dev/null | grep -Fq "ExecStart=\$STACK_SCRIPT start" || append_issue "ups-usb.service is not using \$STACK_SCRIPT"
 	systemctl cat ups-usb.service 2>/dev/null | grep -Fq "KillMode=none" || append_issue "ups-usb.service is allowed to kill preserved NUT daemons"
 	grep -Fq '"\$SYNOPOWEROFF" -s' "\$WATCHDOG_SCRIPT" 2>/dev/null || append_issue "\$WATCHDOG_SCRIPT is missing direct synopoweroff fallback"
+	systemctl cat "\$OUTPUT_SHUTDOWN_SERVICE_NAME" 2>/dev/null | grep -Fq "ExecStart=\$OUTPUT_SHUTDOWN_SCRIPT" || append_issue "\$OUTPUT_SHUTDOWN_SERVICE_NAME is not using \$OUTPUT_SHUTDOWN_SCRIPT"
+	systemctl cat "\$OUTPUT_SHUTDOWN_SERVICE_NAME" 2>/dev/null | grep -Fq "IgnoreOnIsolate=yes" || append_issue "\$OUTPUT_SHUTDOWN_SERVICE_NAME is not isolated from DSM Safe/Standby service stops"
+	grep -Fq "\$OUTPUT_SHUTDOWN_SERVICE_NAME" "\$WATCHDOG_SCRIPT" 2>/dev/null || append_issue "\$WATCHDOG_SCRIPT is not wired to start \$OUTPUT_SHUTDOWN_SERVICE_NAME"
+	grep -Fq "/usr/bin/upsdrvctl shutdown" "\$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null || append_issue "\$OUTPUT_SHUTDOWN_SCRIPT is missing NUT output-shutdown command"
 	systemctl cat safe-shutdown.service 2>/dev/null | grep -Fq "ExecStart=\$SAFE_SHUTDOWN_SCRIPT" || append_issue "safe-shutdown.service is not using \$SAFE_SHUTDOWN_SCRIPT"
 	grep -Fq "NOTIFYCMD /usr/sbin/upssched" "\$UPSMON_CONF" 2>/dev/null || append_issue "upsmon is not configured to invoke upssched"
 	grep -Fq "NOTIFYFLAG ONBATT EXEC" "\$UPSMON_CONF" 2>/dev/null || append_issue "upsmon ONBATT notification does not execute commands"
@@ -1228,6 +1405,8 @@ verify_all() {
 	systemctl is-enabled ch341-ups-healthcheck.timer || true
 	systemctl is-enabled ch341-ups-watchdog.timer || true
 	log
+	systemctl cat ch341-ups-output-shutdown.service | sed -n '1,90p' || true
+	log
 	systemctl cat safe-shutdown.service | sed -n '1,90p' || true
 	log
 	grep '^MONITOR ' "$UPSMON_CONF" || true
@@ -1284,6 +1463,8 @@ NAS kernel: $(uname -a)
 - Synology safe-shutdown drop-in: \`$SAFE_SHUTDOWN_DROPIN\`
 - Safe-shutdown wrapper: \`$SAFE_SHUTDOWN_SCRIPT\`
 - UPS scheduler command wrapper: \`$UPSSCHED_CMD_SCRIPT\`
+- UPS output-shutdown helper: \`$OUTPUT_SHUTDOWN_SCRIPT\`
+- UPS output-shutdown service: \`$OUTPUT_SHUTDOWN_SERVICE\`
 - UPS battery-mode watchdog: \`$WATCHDOG_SCRIPT\`
 - UPS replug udev rule: \`$UDEV_RULE\`
 - Healthcheck script: \`$HEALTH_SCRIPT\`
@@ -1304,9 +1485,9 @@ NAS kernel: $(uname -a)
 - \`upssched\` uses \`$UPSSCHED_CMD_SCRIPT\` as its command script for battery-mode and mains-restored notifications.
 - The watchdog is a DSM systemd timer, not a separate always-running process.
 - It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby shutdown path.
-- It reads DSM's UPS wait time at runtime. It does not send the UPS output-cut command.
-- If DSM has no valid \`ups_safeshutdown\` value, the startup path initializes it to \`$SHUTDOWN_UPS\`. The watchdog does not send the UPS output-cut command before DSM enters Safe/Standby Mode; it only requests DSM Safe Mode after the configured wait time.
-- \`safe-shutdown.service\` has a drop-in that runs \`$SAFE_SHUTDOWN_SCRIPT\` instead of Synology's original safe-shutdown script. This is the safe-shutdown wrapper: it runs late in DSM's Safe/Standby shutdown path, after DSM has started stopping services and protecting volumes. The wrapper uses the serial-aware UPS startup path first, then preserves the Synology \`synoups shutdownups\` behavior only if DSM's UPS-output-shutdown setting is enabled and live UPS status is still \`OB\` or \`LB\`. This matters because Synology's original script calls \`ups-usb.sh start\` directly, and that script rewrites the serial UPS port to \`auto\`.
+- It reads DSM's UPS wait time at runtime. When the wait time expires, it requests DSM Safe/Standby Mode and starts the output-shutdown helper.
+- If DSM has no valid \`ups_safeshutdown\` value, the startup path initializes it to \`$SHUTDOWN_UPS\`. The output-shutdown helper reads that setting at runtime, waits until DSM's UPS safe-shutdown target is active, re-checks live UPS status, and only asks NUT to cut output if the UPS is still \`OB\` or \`LB\`.
+- \`safe-shutdown.service\` has a drop-in that runs \`$SAFE_SHUTDOWN_SCRIPT\` instead of Synology's original safe-shutdown script. This compatibility path preserves Synology's \`synoups shutdownups\` behavior for DSM flows that run the safe-shutdown service directly.
 - The NUT driver is configured with \`offdelay = $UPS_OFF_DELAY_SECONDS\` and \`ondelay = $UPS_ON_DELAY_SECONDS\`. Because \`stayoff\` is not set, \`nutdrv_qx\` uses its normal return behavior: shut the load off, then turn it back on after mains power has returned. The exact behavior must be verified with a controlled outage test, because some low-cost UPS firmware ignores parts of the command.
 - The UPS does not report battery charge/runtime/model fields directly. The config supplies NUT fallback values so DSM can display a normal USB UPS. Battery charge/runtime are estimates; shutdown uses DSM's configured fixed wait time, not the displayed runtime estimate.
 - The healthcheck is a DSM systemd timer, not a separate always-running process.
@@ -1333,6 +1514,7 @@ NAS kernel: $(uname -a)
 \`\`\`sh
 systemctl status ch341-ups.service --no-pager
 systemctl status ups-usb.service --no-pager
+systemctl status ch341-ups-output-shutdown.service --no-pager
 systemctl cat safe-shutdown.service
 $STACK_SCRIPT status
 /usr/bin/upsc ups@localhost
@@ -1372,10 +1554,10 @@ systemctl status ch341-ups-watchdog.service --no-pager
    With no critical writes running, unplug the UPS input from wall power but keep the NAS plugged into the UPS. Within one or two polling intervals, \`/usr/bin/upsc ups@localhost ups.status\` should show \`OB\`. Plug wall power back in before the configured DSM wait time expires; status should return to \`OL\`, and DSM should not enter Safe Mode.
 
 5. Full Safe/Standby Mode test:
-   Only run this when it is acceptable for DSM to stop services. Unplug the UPS input from wall power and wait longer than the configured DSM wait time. Expected: the watchdog requests DSM Safe/Standby Mode without pre-arming UPS output shutdown. When \`safe-shutdown.service\` runs \`$SAFE_SHUTDOWN_SCRIPT\`, the wrapper re-checks live UPS status; if it is still \`OB\` or \`LB\`, Synology sends shutdown-return and UPS output should cut around \`$UPS_OFF_DELAY_SECONDS\` seconds later. Restore wall power. The UPS should turn output back on, and the NAS should start because automatic restart after power failure is enabled in Hardware & Power -> General.
+   Only run this when it is acceptable for DSM to stop services. Unplug the UPS input from wall power and wait longer than the configured DSM UPS wait time. Expected: the watchdog requests DSM Safe/Standby Mode and starts the output-shutdown helper. After DSM's UPS safe-shutdown target is active, if the UPS is still \`OB\` or \`LB\`, the helper asks NUT to cut UPS output after \`$UPS_OFF_DELAY_SECONDS\` seconds. Restore wall power. The UPS should turn output back on, and the NAS should start because automatic restart after power failure is enabled in Hardware & Power -> General.
 
 6. Shortened full-flow test:
-   For a faster controlled test, temporarily set the DSM UPS wait time to 1 minute in Control Panel, unplug the UPS input, and wait for Safe/Standby Mode plus UPS output shutoff. With the default \`offdelay\`, output cut can take about 5 minutes after \`safe-shutdown.service\` runs \`$SAFE_SHUTDOWN_SCRIPT\`. Restore wall power and confirm the NAS starts. After the test, restore the normal wait time in DSM.
+   For a faster controlled test, temporarily set the DSM UPS wait time to 1 minute in Control Panel, unplug the UPS input, and wait for Safe/Standby Mode plus UPS output shutoff. With the default \`offdelay\`, output cut can take about 5 minutes after the helper asks NUT to shut the UPS output down. Restore wall power and confirm the NAS starts. After the test, restore the normal wait time in DSM.
 
 7. DSM update test:
    After any DSM update, run \`$STACK_SCRIPT status\` and \`$HEALTH_SCRIPT\`. If the kernel version changed and \`ch341.ko\` no longer matches, the healthcheck should notify administrators and the module must be rebuilt for the new kernel.
@@ -1387,7 +1569,7 @@ systemctl status ch341-ups-watchdog.service --no-pager
 - The module is loaded from \`/usr/local\` with \`insmod\`.
 - Minor DSM updates that keep the same \`uname -r\` should usually keep working.
 - DSM updates that change the running kernel ABI can make \`ch341.ko\` fail to load. The healthcheck detects this by comparing module \`vermagic\` with \`uname -r\` and sends an alert instead of failing silently.
-- If AC returns before \`$SAFE_SHUTDOWN_SCRIPT\` sends shutdown-return, UPS output shutdown is skipped. If DSM has already told the UPS to cut output, startup after output returns depends on Control Panel -> Hardware & Power -> General -> automatic restart after power failure.
+- If AC returns before the output-shutdown helper sends shutdown-return, UPS output shutdown is skipped. If DSM has already told the UPS to cut output, startup after output returns depends on Control Panel -> Hardware & Power -> General -> automatic restart after power failure.
 EOF
 	chown "$DOC_USER":users "$doc" >/dev/null 2>&1 || true
 	chmod 644 "$doc" || true
@@ -1402,6 +1584,8 @@ install() {
 	write_udev_rule
 	write_stack_unit
 	write_upssched_cmd_script
+	write_output_shutdown_script
+	write_output_shutdown_unit
 	write_watchdog_script
 	write_watchdog_units
 	write_health_script
@@ -1424,6 +1608,7 @@ install() {
 
 restore() {
 	require_root
+	systemctl stop ch341-ups-output-shutdown.service >/dev/null 2>&1 || true
 	systemctl stop ch341-ups-healthcheck.timer >/dev/null 2>&1 || true
 	systemctl disable ch341-ups-healthcheck.timer >/dev/null 2>&1 || true
 	systemctl stop ch341-ups-watchdog.timer >/dev/null 2>&1 || true
@@ -1437,7 +1622,7 @@ restore() {
 	restore_file "$UPSMON_CONF"
 	restore_file "$UPSSCHED_CONF"
 	restore_file "$NUTSCAN_USB"
-	rm -f "$STACK_UNIT" "$HEALTH_SERVICE" "$HEALTH_TIMER" "$WATCHDOG_SERVICE" "$WATCHDOG_TIMER" "$STACK_SCRIPT" "$HEALTH_SCRIPT" "$SAFE_SHUTDOWN_SCRIPT" "$UPSSCHED_CMD_SCRIPT" "$WATCHDOG_SCRIPT" "$UPS_USB_DROPIN" "$SAFE_SHUTDOWN_DROPIN" "$UDEV_RULE"
+	rm -f "$STACK_UNIT" "$HEALTH_SERVICE" "$HEALTH_TIMER" "$OUTPUT_SHUTDOWN_SERVICE" "$WATCHDOG_SERVICE" "$WATCHDOG_TIMER" "$STACK_SCRIPT" "$HEALTH_SCRIPT" "$SAFE_SHUTDOWN_SCRIPT" "$UPSSCHED_CMD_SCRIPT" "$OUTPUT_SHUTDOWN_SCRIPT" "$WATCHDOG_SCRIPT" "$UPS_USB_DROPIN" "$SAFE_SHUTDOWN_DROPIN" "$UDEV_RULE"
 	rm -f "$CONNECTED_STATE_FILE" "$POWER_STATE_FILE" "$FORCE_RESTART_FILE"
 	rmdir "$UPS_USB_DROPIN_DIR" >/dev/null 2>&1 || true
 	rmdir "$SAFE_SHUTDOWN_DROPIN_DIR" >/dev/null 2>&1 || true
@@ -1455,6 +1640,7 @@ case "$command" in
 		"$STACK_SCRIPT" status
 		systemctl status ch341-ups.service --no-pager || true
 		systemctl status ch341-ups-healthcheck.timer --no-pager || true
+		systemctl status ch341-ups-output-shutdown.service --no-pager || true
 		;;
 	restore)
 		restore

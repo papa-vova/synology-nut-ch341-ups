@@ -20,7 +20,7 @@ The setup stays as close as practical to stock DSM:
 - The added `ch341.ko` module is loaded from `/usr/local`, creates `/dev/ttyUSB*` for the CH341 bridge, and leaves UPS monitoring to the stock NUT stack over that serial TTY.
 - A DSM service drop-in points the stock UPS USB service at the serial-aware startup path.
 - A watchdog timer runs the DSM-configured power-loss decision loop shown below.
-- The Safe/Standby shutdown path re-checks live UPS status before any UPS output-cut command.
+- After DSM Safe/Standby Mode starts, a detached output-shutdown helper re-checks live UPS status before asking NUT to cut UPS output.
 - A healthcheck timer verifies the installed setup after boot and after DSM updates. It uses DSM's stock Power supply events for user-visible notifications, but it is not part of the power-loss sequence.
 
 ### DSM Runtime
@@ -34,13 +34,13 @@ The setup stays as close as practical to stock DSM:
 
 - The watchdog is a DSM systemd timer, not a separate always-running process.
 - It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby shutdown path shown in the outage sequence.
-- It reads DSM's UPS wait time at runtime. It does not send the UPS output-cut command.
+- It reads DSM's UPS wait time at runtime. When the wait time expires, it requests DSM Safe/Standby Mode and starts the output-shutdown helper.
 
-#### Safe-Shutdown Wrapper
+#### Output Shutdown
 
-- `ch341-safe-shutdown.sh` is installed as a drop-in replacement for Synology's `safe-shutdown.service` command.
-- It runs late in DSM's Safe/Standby shutdown path, after DSM has started stopping services and protecting volumes.
-- It refreshes the serial UPS stack, reads DSM's UPS-output-shutdown setting, re-checks live UPS status, and only calls `synoups shutdownups` if the UPS is still `OB` or `LB`.
+- The output-shutdown helper waits until DSM's UPS safe-shutdown target is active, then reads DSM's UPS-output-shutdown setting and re-checks live UPS status.
+- If the setting is enabled and the UPS is still `OB` or `LB`, it asks NUT to perform the configured UPS output shutdown using `offdelay` and `ondelay`.
+- A `safe-shutdown.service` drop-in remains installed as a compatibility path for DSM flows that run Synology's safe-shutdown service directly.
 
 #### Healthcheck
 
@@ -58,7 +58,7 @@ sequenceDiagram
   participant U as ups
   participant W as watchdog
   participant D as dsm
-  participant S as safe-shutdown wrapper
+  participant O as output-shutdown helper
 
   M-->>U: power cut
   U-->>D: reports OB or LB over CH341 serial
@@ -71,18 +71,18 @@ sequenceDiagram
     W->>W: clear battery timer
   else timer expires
     W-->>D: request Safe/Standby Mode
+    W-->>O: start output-shutdown helper
     D->>D: stop services and protect volumes
-    D-->>S: run ch341-safe-shutdown.sh
-    S->>S: re-check UPS status
+    O->>O: wait for UPS safe-shutdown target and re-check UPS status
     alt still on battery
-      S-->>U: request shutdown-return
+      O-->>U: request shutdown-return
       U->>U: wait offdelay, then cut output
       M-->>U: power returns
       U->>U: wait ondelay, then restore output
       U-->>D: supply power
       D->>D: boot and start UPS services
     else mains already returned
-      S->>S: skip UPS output cut
+      O->>O: skip UPS output cut
     end
     D-->>W: expose current UPS status
     W->>W: verify monitoring and clear outage state
@@ -237,7 +237,7 @@ rules decide which delivery channels receive them.
 - `Shut down UPS when the system enters Standby Mode`: checked if the UPS should cut output after DSM enters Safe/Standby Mode.
 - `Until low battery`: not recommended for this UPS class because battery/runtime reporting is not reliable enough for the shutdown policy.
 
-The watchdog reads DSM's UPS wait time at runtime. `ch341-safe-shutdown.sh`, installed under `safe-shutdown.service`, reads the UPS-output-shutdown setting and re-checks that the UPS is still on battery before asking the UPS to cut output. Changing those two UI settings does not require reinstalling.
+The watchdog reads DSM's UPS wait time at runtime. The output-shutdown helper waits for DSM's UPS safe-shutdown target, reads the UPS-output-shutdown setting, and re-checks that the UPS is still on battery before asking NUT to cut output. Changing those two UI settings does not require reinstalling.
 
 ### Build And Install
 
@@ -290,6 +290,7 @@ It verifies:
 - CH341 kernel module and `/dev/ttyUSB*`
 - NUT driver, server, and monitor processes
 - DSM UPS services and timers
+- output-shutdown helper wiring
 - installed DSM/NUT event wiring for the five stock UPS events
 - DSM UPS wait time and output-shutdown setting
 - live DSM and NUT UPS status
@@ -321,7 +322,7 @@ Expected:
 3. Cut mains input to the UPS.
 4. Wait longer than the configured DSM UPS wait time.
 5. DSM enters Safe/Standby Mode.
-6. If UPS status is still `OB` or `LB` when `safe-shutdown.service` runs `ch341-safe-shutdown.sh`, UPS output cuts after the configured off-delay.
+6. If UPS status is still `OB` or `LB`, the output-shutdown helper asks NUT to cut UPS output after the configured off-delay.
 7. Restore mains input to the UPS.
 8. UPS output returns after the configured on-delay.
 9. NAS boots.

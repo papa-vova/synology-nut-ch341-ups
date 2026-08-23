@@ -110,6 +110,12 @@ check_enabled ch341-ups-healthcheck.timer
 check_active ch341-ups-watchdog.timer
 check_enabled ch341-ups-watchdog.timer
 
+if systemctl cat ch341-ups-output-shutdown.service 2>/dev/null | grep -Fq 'ExecStart=/usr/local/sbin/ch341-ups-output-shutdown.sh'; then
+  ok "ch341-ups-output-shutdown.service" "installed"
+else
+  bad "ch341-ups-output-shutdown.service" "missing or not wired"
+fi
+
 wait_time="$(sudo /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_wait_time 2>/dev/null)"
 if [ -n "$wait_time" ]; then
   ok "DSM UPS wait time" "${wait_time}s"
