@@ -34,11 +34,11 @@ The setup stays as close as practical to stock DSM:
 
 - The watchdog is a DSM systemd timer, not a separate always-running process.
 - It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby shutdown path shown in the outage sequence.
-- It reads DSM's UPS wait time at runtime. When the wait time expires, it requests DSM Safe/Standby Mode and starts the output-shutdown helper.
+- It reads DSM's UPS wait time at runtime. Wait-time expiry and low-battery/FSD events request DSM Safe/Standby Mode and start the output-shutdown helper.
 
 #### Output Shutdown
 
-- The output-shutdown helper waits until DSM's UPS safe-shutdown target is active, then reads DSM's UPS-output-shutdown setting and re-checks live UPS status.
+- After DSM Safe/Standby Mode starts, the output-shutdown helper briefly waits for DSM's UPS safe-shutdown target, then reads DSM's UPS-output-shutdown setting and re-checks live UPS status.
 - If the setting is enabled and the UPS is still `OB` or `LB`, it asks NUT to perform the configured UPS output shutdown using `offdelay` and `ondelay`.
 - A `safe-shutdown.service` drop-in remains installed as a compatibility path for DSM flows that run Synology's safe-shutdown service directly.
 
@@ -73,7 +73,7 @@ sequenceDiagram
     W-->>D: request Safe/Standby Mode
     W-->>O: start output-shutdown helper
     D->>D: stop services and protect volumes
-    O->>O: wait for UPS safe-shutdown target and re-check UPS status
+    O->>O: wait briefly for safe target, then re-check UPS status
     alt still on battery
       O-->>U: request shutdown-return
       U->>U: wait offdelay, then cut output
@@ -125,7 +125,7 @@ Set local parameters:
 export DSM_USER=admin
 export NAS=nas
 export WAIT_SECONDS=900
-export UPS_OFF_DELAY_SECONDS=300
+export UPS_OFF_DELAY_SECONDS=60
 export UPS_ON_DELAY_SECONDS=180
 ```
 
@@ -237,7 +237,7 @@ rules decide which delivery channels receive them.
 - `Shut down UPS when the system enters Standby Mode`: checked if the UPS should cut output after DSM enters Safe/Standby Mode.
 - `Until low battery`: not recommended for this UPS class because battery/runtime reporting is not reliable enough for the shutdown policy.
 
-The watchdog reads DSM's UPS wait time at runtime. The output-shutdown helper waits for DSM's UPS safe-shutdown target, reads the UPS-output-shutdown setting, and re-checks that the UPS is still on battery before asking NUT to cut output. Changing those two UI settings does not require reinstalling.
+The watchdog reads DSM's UPS wait time at runtime. The output-shutdown helper is started when DSM Safe/Standby Mode is requested by wait-time expiry or low battery, briefly waits for DSM's UPS safe-shutdown target, reads the UPS-output-shutdown setting, and re-checks that the UPS is still on battery before asking NUT to cut output. Changing those two UI settings does not require reinstalling.
 
 ### Build And Install
 
@@ -320,7 +320,7 @@ Expected:
 1. Charge the UPS enough for the test.
 2. Run `make check`.
 3. Cut mains input to the UPS.
-4. Wait longer than the configured DSM UPS wait time.
+4. Wait longer than the configured DSM UPS wait time, or until the UPS reports low battery.
 5. DSM enters Safe/Standby Mode.
 6. If UPS status is still `OB` or `LB`, the output-shutdown helper asks NUT to cut UPS output after the configured off-delay.
 7. Restore mains input to the UPS.

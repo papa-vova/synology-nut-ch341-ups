@@ -46,3 +46,37 @@ systemctl is-active ups-usb.service 2>/dev/null || true
 systemctl is-active ch341-ups.service 2>/dev/null || true
 systemctl is-active ch341-ups-healthcheck.timer 2>/dev/null || true
 systemctl is-active ch341-ups-watchdog.timer 2>/dev/null || true
+systemctl is-active ch341-ups-output-shutdown.service 2>/dev/null || true
+
+section "Shutdown state"
+printf 'shutdown.target=%s\n' "$(synosystemctl get-active-status shutdown.target 2>/dev/null || true)"
+printf 'safe-shutdown.target=%s\n' "$(synosystemctl get-active-status safe-shutdown.target 2>/dev/null || true)"
+printf 'safe-shutdown.service=%s\n' "$(systemctl is-active safe-shutdown.service 2>/dev/null || true)"
+printf 'output-helper=%s\n' "$(systemctl is-active ch341-ups-output-shutdown.service 2>/dev/null || true)"
+ls -l /tmp/ups.safedown /etc/killpower /run/ch341-ups-safemode.requested 2>/dev/null || true
+for marker in /tmp/ups.safedown /etc/killpower /run/ch341-ups-safemode.requested; do
+  [ -f "$marker" ] || continue
+  printf '\n-- %s --\n' "$marker"
+  cat "$marker" 2>/dev/null || true
+done
+
+section "UPS config"
+synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_wait_time 2>/dev/null || true
+synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_safeshutdown 2>/dev/null || true
+grep -E '^[[:space:]]*(offdelay|ondelay|driver|port|protocol)[[:space:]]*=' /etc/ups/ups.conf 2>/dev/null || true
+grep -E '^NOTIFYFLAG (ONBATT|ONLINE|LOWBATT|FSD)|^NOTIFYCMD' /etc/ups/upsmon.conf 2>/dev/null || true
+grep -E '^CMDSCRIPT|^AT (ONBATT|ONLINE|LOWBATT|FSD)' /etc/ups/upssched.conf 2>/dev/null || true
+
+section "Recent UPS shutdown logs"
+for log in \
+  /var/log/messages \
+  /var/log/ups.log \
+  /var/log/systemd/ch341-ups-watchdog.service.log \
+  /var/log/systemd/ch341-ups-output-shutdown.service.log \
+  /var/log/systemd/safe-shutdown.service.log \
+  /var/log/systemd/ups-usb.service.log
+do
+  [ -r "$log" ] || continue
+  printf '\n-- %s --\n' "$log"
+  grep -hE 'ch341|synoups|upsmsg|safe-shutdown|output shutdown|upsdrvctl shutdown|shutdown.return|Shutdown failed|wait time|Safe Mode|safe shutdown|online|lowbatt|fsd|UPS safe shutdown|UPS shutdown|Server going to Safe Shutdown|Server is on battery|Server back online' "$log" 2>/dev/null | tail -n 80 || true
+done
