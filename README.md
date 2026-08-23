@@ -268,8 +268,7 @@ make install
 - Mains input restored: AC-return event.
 - Low battery: low-battery event.
 - UPS disconnected/unavailable: UPS-disconnected event.
-- DSM UPS settings changes are settings changes only.
-- During battery mode, settings changes preserve the already-running UPS monitor instead of restarting it.
+- DSM UPS settings changes are settings changes only; when monitoring is already healthy, they preserve the already-running UPS monitor instead of restarting it.
 - Power-state events use the single DSM-facing path: `upsmon EXEC -> upssched -> wrapper -> synoups -> DSM stock UPS event`.
 - `SYSLOG`/`WALL` are not enabled for those events on DSM, because they can create duplicate DSM notifications outside the `synoups` path.
 - The last observed power state is kept in `/run/ch341-ups-power.state` across service restarts; it resets on NAS boot.

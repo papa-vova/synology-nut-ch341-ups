@@ -22,7 +22,7 @@ set -eu
 #   STACK_SCRIPT, HEALTH_SCRIPT, SAFE_SHUTDOWN_SCRIPT, UPSSCHED_CMD_SCRIPT
 #   WATCHDOG_SCRIPT, STACK_UNIT, HEALTH_SERVICE, HEALTH_TIMER
 #   WATCHDOG_SERVICE, WATCHDOG_TIMER, SAFE_SHUTDOWN_DROPIN_DIR
-#   UPS_USB_DROPIN_DIR, UDEV_RULE
+#   UPS_USB_DROPIN_DIR, UDEV_RULE, FORCE_RESTART_FILE
 #
 # Normal installs should not override advanced paths.
 
@@ -91,6 +91,7 @@ BACKUP_SUFFIX=".ch341ups-bak"
 LOG_TAG="${LOG_TAG:-ch341-ups}"
 CONNECTED_STATE_FILE="${CONNECTED_STATE_FILE:-/run/ch341-ups-connected.state}"
 POWER_STATE_FILE="${POWER_STATE_FILE:-/run/ch341-ups-power.state}"
+FORCE_RESTART_FILE="${FORCE_RESTART_FILE:-/run/ch341-ups-force-restart}"
 
 log() {
 	logger -p user.info -t "$LOG_TAG" "$*" 2>/dev/null || true
@@ -209,6 +210,7 @@ LOG_TAG="$LOG_TAG"
 UPS_PLUGIN_NOTIFY_SERVICE="ups-plugin-notify.service"
 CONNECTED_STATE_FILE="$CONNECTED_STATE_FILE"
 POWER_STATE_FILE="$POWER_STATE_FILE"
+FORCE_RESTART_FILE="$FORCE_RESTART_FILE"
 
 log() {
 	logger -p user.info -t "\$LOG_TAG" "\$*" 2>/dev/null || true
@@ -284,22 +286,16 @@ write_power_state() {
 	printf '%s\n' "\$1" > "\$POWER_STATE_FILE" 2>/dev/null || true
 }
 
-is_monitoring_on_battery() {
-	status="\$(current_ups_status)"
-	case "\$status" in
-		*OB*|*LB*)
-			return 0
-			;;
-	esac
-	return 1
-}
-
 running_driver_port() {
 	/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" driver.parameter.port 2>/dev/null || true
 }
 
 preserve_running_stack_if_healthy() {
 	tty_dev="\$1"
+	if [ -e "\$FORCE_RESTART_FILE" ]; then
+		log "Forced UPS monitor restart requested"
+		return 1
+	fi
 	status="\$(current_ups_status)"
 	if ! valid_ups_status_value "\$status"; then
 		return 1
@@ -516,6 +512,7 @@ start_stack() {
 			log "Synology UPS USB service is reading \$UPS_NAME@localhost via \$tty_dev"
 			emit_connected_event_after_start
 			mark_connected
+			rm -f "\$FORCE_RESTART_FILE" 2>/dev/null || true
 			return 0
 		fi
 		i=\$((i + 1))
@@ -528,8 +525,13 @@ start_stack() {
 }
 
 stop_stack() {
-	if is_monitoring_on_battery; then
-		log "UPS is on battery; preserving running NUT daemons during service stop"
+	if [ -e "\$FORCE_RESTART_FILE" ]; then
+		log "Forced UPS monitor restart requested; stopping NUT daemons"
+		/usr/syno/lib/systemd/scripts/ups-usb.sh stop >/dev/null 2>&1 || true
+		return 0
+	fi
+	if ups_monitoring_readable; then
+		log "UPS monitoring is healthy; preserving running NUT daemons during service stop"
 		return 0
 	fi
 	/usr/syno/lib/systemd/scripts/ups-usb.sh stop >/dev/null 2>&1 || true
@@ -611,6 +613,7 @@ write_ups_usb_dropin() {
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+KillMode=none
 ExecStart=
 ExecStart=$STACK_SCRIPT start
 ExecStop=
@@ -625,8 +628,8 @@ EOF
 write_udev_rule() {
 	mkdir -p "$(dirname "$UDEV_RULE")"
 cat > "$UDEV_RULE" <<EOF
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ATTRS{idVendor}=="$VID", ATTRS{idProduct}=="$PID", RUN+="/bin/systemctl restart ups-usb.service"
-ACTION=="remove", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", RUN+="/bin/sh -c 'rm -f $CONNECTED_STATE_FILE; /bin/systemctl --no-block restart ups-plugout-notify.service'"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ATTRS{idVendor}=="$VID", ATTRS{idProduct}=="$PID", RUN+="/bin/sh -c 'touch $FORCE_RESTART_FILE; /bin/systemctl restart ups-usb.service'"
+ACTION=="remove", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", RUN+="/bin/sh -c 'rm -f $CONNECTED_STATE_FILE; touch $FORCE_RESTART_FILE; /bin/systemctl --no-block restart ups-plugout-notify.service'"
 EOF
 	chown root:root "$UDEV_RULE" || true
 	chmod 644 "$UDEV_RULE"
@@ -940,6 +943,7 @@ SYNOUPS_CONF="$SYNOUPS_CONF"
 UDEV_RULE="$UDEV_RULE"
 FAIL_STAMP="/run/ch341-ups-health.failed"
 CONNECTED_STATE_FILE="$CONNECTED_STATE_FILE"
+FORCE_RESTART_FILE="$FORCE_RESTART_FILE"
 
 issues=""
 
@@ -1001,6 +1005,7 @@ check_once() {
 	grep -Fq "\$UPS_PLUGIN_NOTIFY_SERVICE" "\$STACK_SCRIPT" 2>/dev/null || append_issue "UPS connected event is not wired"
 	grep -Fq "\$UPS_PLUGOUT_NOTIFY_SERVICE" "\$UDEV_RULE" 2>/dev/null || append_issue "UPS disconnected udev event is not wired"
 	systemctl cat ups-usb.service 2>/dev/null | grep -Fq "ExecStart=\$STACK_SCRIPT start" || append_issue "ups-usb.service is not using \$STACK_SCRIPT"
+	systemctl cat ups-usb.service 2>/dev/null | grep -Fq "KillMode=none" || append_issue "ups-usb.service is allowed to kill preserved NUT daemons"
 	systemctl cat safe-shutdown.service 2>/dev/null | grep -Fq "ExecStart=\$SAFE_SHUTDOWN_SCRIPT" || append_issue "safe-shutdown.service is not using \$SAFE_SHUTDOWN_SCRIPT"
 	grep -Fq "NOTIFYCMD /usr/sbin/upssched" "\$UPSMON_CONF" 2>/dev/null || append_issue "upsmon is not configured to invoke upssched"
 	grep -Fq "NOTIFYFLAG ONBATT EXEC" "\$UPSMON_CONF" 2>/dev/null || append_issue "upsmon ONBATT notification does not execute commands"
@@ -1059,6 +1064,7 @@ current_status="\$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.s
 if ! valid_ups_status "\$current_status"; then
 	rm -f "\$CONNECTED_STATE_FILE" 2>/dev/null || true
 fi
+touch "\$FORCE_RESTART_FILE" 2>/dev/null || true
 systemctl restart ch341-ups.service >/dev/null 2>&1 || true
 sleep 8
 
@@ -1332,8 +1338,7 @@ systemctl status ch341-ups-watchdog.service --no-pager
 - Mains input restored: AC-return event.
 - Low battery: low-battery event.
 - UPS disconnected/unavailable: UPS-disconnected event.
-- DSM UPS settings changes are settings changes only.
-- During battery mode, settings changes preserve the already-running UPS monitor instead of restarting it.
+- DSM UPS settings changes are settings changes only; when monitoring is already healthy, they preserve the already-running UPS monitor instead of restarting it.
 - Power-state events use the single DSM-facing path: \`upsmon EXEC -> upssched -> wrapper -> synoups -> DSM stock UPS event\`.
 - \`SYSLOG\`/\`WALL\` are not enabled for those events on DSM, because they can create duplicate DSM notifications outside the \`synoups\` path.
 - The last observed power state is kept in \`/run/ch341-ups-power.state\` across service restarts; it resets on NAS boot.
@@ -1395,6 +1400,7 @@ install() {
 	systemctl enable ch341-ups-healthcheck.timer
 	systemctl enable ch341-ups-watchdog.timer
 	seed_connected_state_for_upgrade
+	touch "$FORCE_RESTART_FILE" 2>/dev/null || true
 	systemctl restart ch341-ups.service
 	systemctl restart ch341-ups-healthcheck.timer
 	systemctl restart ch341-ups-watchdog.timer
@@ -1419,6 +1425,7 @@ restore() {
 	restore_file "$UPSSCHED_CONF"
 	restore_file "$NUTSCAN_USB"
 	rm -f "$STACK_UNIT" "$HEALTH_SERVICE" "$HEALTH_TIMER" "$WATCHDOG_SERVICE" "$WATCHDOG_TIMER" "$STACK_SCRIPT" "$HEALTH_SCRIPT" "$SAFE_SHUTDOWN_SCRIPT" "$UPSSCHED_CMD_SCRIPT" "$WATCHDOG_SCRIPT" "$UPS_USB_DROPIN" "$SAFE_SHUTDOWN_DROPIN" "$UDEV_RULE"
+	rm -f "$CONNECTED_STATE_FILE" "$POWER_STATE_FILE" "$FORCE_RESTART_FILE"
 	rmdir "$UPS_USB_DROPIN_DIR" >/dev/null 2>&1 || true
 	rmdir "$SAFE_SHUTDOWN_DROPIN_DIR" >/dev/null 2>&1 || true
 	udevadm control --reload-rules >/dev/null 2>&1 || true
