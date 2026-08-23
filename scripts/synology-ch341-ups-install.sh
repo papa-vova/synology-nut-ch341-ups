@@ -791,6 +791,7 @@ UPS_NAME="$UPS_NAME"
 DEFAULT_WAIT_SECONDS="$WAIT_SECONDS"
 SYNOUPS_CONF="$SYNOUPS_CONF"
 SYNOUPS="/usr/syno/bin/synoups"
+SYNOPOWEROFF="/usr/syno/sbin/synopoweroff"
 STATE_DIR="/run/ch341-ups-watchdog"
 ONBATT_STAMP="\$STATE_DIR/onbattery.since"
 SAFEMODE_REQUESTED="/run/ch341-ups-safemode.requested"
@@ -872,7 +873,17 @@ fi
 touch "\$SAFEMODE_REQUESTED"
 log "UPS watchdog battery timer reached \${elapsed}s (configured wait \${wait_seconds}s); requesting DSM Safe Mode through Synology wait-time-expired path"
 
-"\$SYNOUPS" waittimeup || log "UPS watchdog: Synology wait-time-expired Safe Mode command failed"
+if "\$SYNOUPS" waittimeup; then
+	sleep 10
+	shutdown_state="\$(synosystemctl get-active-status shutdown.target 2>/dev/null || true)"
+	safe_shutdown_state="\$(systemctl is-active safe-shutdown.service 2>/dev/null || true)"
+	if [ "\$shutdown_state" != "active" ] && [ "\$safe_shutdown_state" != "active" ] && is_on_battery; then
+		log "UPS watchdog: Synology wait-time path did not start system shutdown; calling synopoweroff -s directly"
+		"\$SYNOPOWEROFF" -s || log "UPS watchdog: direct synopoweroff safe-shutdown command failed"
+	fi
+else
+	log "UPS watchdog: Synology wait-time-expired Safe Mode command failed"
+fi
 EOF
 	chown root:root "$WATCHDOG_SCRIPT" || true
 	chmod 755 "$WATCHDOG_SCRIPT"
@@ -1006,6 +1017,7 @@ check_once() {
 	grep -Fq "\$UPS_PLUGOUT_NOTIFY_SERVICE" "\$UDEV_RULE" 2>/dev/null || append_issue "UPS disconnected udev event is not wired"
 	systemctl cat ups-usb.service 2>/dev/null | grep -Fq "ExecStart=\$STACK_SCRIPT start" || append_issue "ups-usb.service is not using \$STACK_SCRIPT"
 	systemctl cat ups-usb.service 2>/dev/null | grep -Fq "KillMode=none" || append_issue "ups-usb.service is allowed to kill preserved NUT daemons"
+	grep -Fq '"\$SYNOPOWEROFF" -s' "\$WATCHDOG_SCRIPT" 2>/dev/null || append_issue "\$WATCHDOG_SCRIPT is missing direct synopoweroff fallback"
 	systemctl cat safe-shutdown.service 2>/dev/null | grep -Fq "ExecStart=\$SAFE_SHUTDOWN_SCRIPT" || append_issue "safe-shutdown.service is not using \$SAFE_SHUTDOWN_SCRIPT"
 	grep -Fq "NOTIFYCMD /usr/sbin/upssched" "\$UPSMON_CONF" 2>/dev/null || append_issue "upsmon is not configured to invoke upssched"
 	grep -Fq "NOTIFYFLAG ONBATT EXEC" "\$UPSMON_CONF" 2>/dev/null || append_issue "upsmon ONBATT notification does not execute commands"

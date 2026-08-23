@@ -124,11 +124,15 @@ else
   bad "DSM UPS output shutdown" "not readable"
 fi
 
-synoups_status="$(/usr/bin/timeout 8 sudo /usr/syno/bin/synoups status 2>&1)"
-case "$synoups_status" in
-  *OL*|*OB*|*LB*) ok "DSM UPS status" "$(first_line "$synoups_status")" ;;
-  *) bad "DSM UPS status" "$(first_line_or_timeout "$synoups_status")" ;;
-esac
+if [ -e /tmp/ups.safedown ]; then
+  bad "DSM UPS status" "skipped: DSM safe-down marker active"
+else
+  synoups_status="$(/usr/bin/timeout 8 sudo /usr/syno/bin/synoups status 2>&1)"
+  case "$synoups_status" in
+    *OL*|*OB*|*LB*) ok "DSM UPS status" "$(first_line "$synoups_status")" ;;
+    *) bad "DSM UPS status" "$(first_line_or_timeout "$synoups_status")" ;;
+  esac
+fi
 
 nut_status="$(/usr/bin/timeout 8 /usr/bin/upsc ups@localhost ups.status 2>&1)"
 case "$nut_status" in
