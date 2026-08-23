@@ -483,14 +483,10 @@ set -u
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/syno/bin:/usr/syno/sbin
 
-STACK_SCRIPT="$STACK_SCRIPT"
 UPS_NAME="$UPS_NAME"
-SYNOUPS_CONF="$SYNOUPS_CONF"
 SYNOUPS="/usr/syno/bin/synoups"
 LOG_TAG="ch341-ups"
-SHUTDOWN_SENT="/run/ch341-ups-shutdown-return.sent"
-SAFEMODE_FILE="/tmp/ups.safedown"
-SYNOUPS_SHUTDOWN_TIMEOUT_SECONDS=180
+SAFEMODE_REQUESTED="/run/ch341-ups-safemode.requested"
 
 log() {
 	logger -p user.err -t "\$LOG_TAG" "\$*"
@@ -507,37 +503,8 @@ is_on_battery() {
 			return 0
 			;;
 	esac
-	log "Skipping final UPS shutdown action because current UPS status is: \${status:-empty}"
+	log "Skipping DSM Safe Mode request because current UPS status is: \${status:-empty}"
 	return 1
-}
-
-ups_output_shutdown_enabled() {
-	value="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_safeshutdown 2>/dev/null || true)"
-	[ "\$value" = "yes" ]
-}
-
-schedule_ups_output_cut() {
-	if [ -e "\$SHUTDOWN_SENT" ]; then
-		log "UPS shutdown-return already requested; skipping duplicate request"
-		return 0
-	fi
-	touch "\$SHUTDOWN_SENT"
-	log "Scheduling UPS shutdown-return before DSM enters Safe Mode"
-	"\$STACK_SCRIPT" start || log "Could not refresh serial UPS stack before shutdown-return command"
-	if ups_output_shutdown_enabled; then
-		fail_count_before="\$(grep -F "UPS shutdown fail." "\$SAFEMODE_FILE" 2>/dev/null | wc -l | tr -d ' ')"
-		if /usr/bin/timeout "\$SYNOUPS_SHUTDOWN_TIMEOUT_SECONDS" "\$SYNOUPS" shutdownups; then
-			fail_count_after="\$(grep -F "UPS shutdown fail." "\$SAFEMODE_FILE" 2>/dev/null | wc -l | tr -d ' ')"
-			if [ "\${fail_count_after:-0}" -le "\${fail_count_before:-0}" ]; then
-				log "Synology UPS shutdown-return command completed"
-				return 0
-			fi
-			log "Synology UPS shutdown-return reported failure; trying upsdrvctl shutdown fallback"
-		else
-			log "Synology UPS shutdown-return command failed; trying upsdrvctl shutdown fallback"
-		fi
-		/usr/bin/timeout 60 /usr/bin/upsdrvctl -u root shutdown || log "upsdrvctl shutdown fallback failed"
-	fi
 }
 
 case "\${1:-}" in
@@ -545,7 +512,7 @@ case "\${1:-}" in
 		pass_to_synology onbatt
 		;;
 	online|nocomm|fsd)
-		[ "\$1" = "online" ] && rm -f "\$SHUTDOWN_SENT"
+		[ "\$1" = "online" ] && rm -f "\$SAFEMODE_REQUESTED"
 		pass_to_synology "\$1"
 		;;
 	lowbatt)
@@ -553,7 +520,8 @@ case "\${1:-}" in
 		;;
 	waittimeup)
 		if is_on_battery; then
-			schedule_ups_output_cut
+			touch "\$SAFEMODE_REQUESTED"
+			log "UPS scheduler wait time reached; requesting DSM Safe Mode without pre-arming UPS output shutdown"
 			pass_to_synology lowbatt
 		fi
 		;;
@@ -575,16 +543,13 @@ set -u
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/syno/bin:/usr/syno/sbin
 
-STACK_SCRIPT="$STACK_SCRIPT"
 UPS_NAME="$UPS_NAME"
 DEFAULT_WAIT_SECONDS="$WAIT_SECONDS"
 SYNOUPS_CONF="$SYNOUPS_CONF"
 SYNOUPS="/usr/syno/bin/synoups"
 STATE_DIR="/run/ch341-ups-watchdog"
 ONBATT_STAMP="\$STATE_DIR/onbattery.since"
-SHUTDOWN_SENT="/run/ch341-ups-shutdown-return.sent"
-SAFEMODE_FILE="/tmp/ups.safedown"
-SYNOUPS_SHUTDOWN_TIMEOUT_SECONDS=180
+SAFEMODE_REQUESTED="/run/ch341-ups-safemode.requested"
 LOG_TAG="ch341-ups"
 
 log() {
@@ -608,11 +573,6 @@ ups_support_enabled() {
 	[ "\$value" = "yes" ]
 }
 
-ups_output_shutdown_enabled() {
-	value="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_safeshutdown 2>/dev/null || true)"
-	[ "\$value" = "yes" ]
-}
-
 mkdir -p "\$STATE_DIR"
 
 status="\$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || true)"
@@ -620,7 +580,7 @@ now="\$(date +%s)"
 
 if ! ups_support_enabled; then
 	log "DSM UPS support is disabled; watchdog inactive"
-	rm -f "\$ONBATT_STAMP" "\$SHUTDOWN_SENT"
+	rm -f "\$ONBATT_STAMP" "\$SAFEMODE_REQUESTED"
 	exit 0
 fi
 
@@ -633,13 +593,17 @@ case "\$status" in
 		fi
 		;;
 	*OL*)
-		if [ -f "\$ONBATT_STAMP" ] || [ -f "\$SHUTDOWN_SENT" ]; then
+		if [ -f "\$ONBATT_STAMP" ] || [ -f "\$SAFEMODE_REQUESTED" ]; then
 			log "UPS watchdog saw mains restored: \$status"
 		fi
-		rm -f "\$ONBATT_STAMP" "\$SHUTDOWN_SENT"
+		rm -f "\$ONBATT_STAMP" "\$SAFEMODE_REQUESTED"
 		exit 0
 		;;
 	*)
+		if [ -f "\$SAFEMODE_REQUESTED" ]; then
+			log "UPS watchdog could not read valid UPS status after Safe Mode request: \${status:-empty}"
+			exit 0
+		fi
 		log "UPS watchdog could not read valid UPS status: \${status:-empty}"
 		exit 1
 		;;
@@ -657,32 +621,12 @@ if [ "\$elapsed" -lt "\$wait_seconds" ]; then
 	exit 0
 fi
 
-if [ -e "\$SHUTDOWN_SENT" ]; then
+if [ -e "\$SAFEMODE_REQUESTED" ]; then
 	exit 0
 fi
 
-touch "\$SHUTDOWN_SENT"
-log "UPS watchdog battery timer reached \${elapsed}s (configured wait \${wait_seconds}s); scheduling UPS shutdown-return and DSM Safe Mode"
-
-"\$STACK_SCRIPT" start || log "UPS watchdog could not refresh serial UPS stack before shutdown-return command"
-
-if ups_output_shutdown_enabled; then
-	fail_count_before="\$(grep -F "UPS shutdown fail." "\$SAFEMODE_FILE" 2>/dev/null | wc -l | tr -d ' ')"
-	if /usr/bin/timeout "\$SYNOUPS_SHUTDOWN_TIMEOUT_SECONDS" "\$SYNOUPS" shutdownups; then
-		fail_count_after="\$(grep -F "UPS shutdown fail." "\$SAFEMODE_FILE" 2>/dev/null | wc -l | tr -d ' ')"
-		if [ "\${fail_count_after:-0}" -le "\${fail_count_before:-0}" ]; then
-			log "UPS watchdog: Synology UPS shutdown-return command completed"
-		else
-			log "UPS watchdog: Synology UPS shutdown-return reported failure; trying upsdrvctl shutdown fallback"
-			/usr/bin/timeout 60 /usr/bin/upsdrvctl -u root shutdown || log "UPS watchdog: upsdrvctl shutdown fallback failed"
-		fi
-	else
-		log "UPS watchdog: Synology UPS shutdown-return failed; trying upsdrvctl shutdown fallback"
-		/usr/bin/timeout 60 /usr/bin/upsdrvctl -u root shutdown || log "UPS watchdog: upsdrvctl shutdown fallback failed"
-	fi
-else
-	log "DSM UPS output shutdown is disabled; skipping UPS output cut"
-fi
+touch "\$SAFEMODE_REQUESTED"
+log "UPS watchdog battery timer reached \${elapsed}s (configured wait \${wait_seconds}s); requesting DSM Safe Mode without pre-arming UPS output shutdown"
 
 "\$SYNOUPS" lowbatt || log "UPS watchdog: Synology lowbatt Safe Mode command failed"
 EOF
@@ -933,8 +877,29 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/syno/bin:/usr/syno/sbin
 
 SYNOUPS_CONF="$SYNOUPS_CONF"
 STACK_SCRIPT="$STACK_SCRIPT"
+UPS_NAME="$UPS_NAME"
 
-logger -p user.err -t ch341-ups "Safe shutdown started; preparing serial UPS shutdown-return path"
+log() {
+	logger -p user.err -t ch341-ups "\$*"
+}
+
+ups_output_shutdown_enabled() {
+	value="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_safeshutdown 2>/dev/null || true)"
+	[ "\$value" = "yes" ]
+}
+
+is_on_battery() {
+	status="\$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || true)"
+	case "\$status" in
+		*OB*|*LB*)
+			return 0
+			;;
+	esac
+	log "Skipping UPS output shutdown during Safe Mode because current UPS status is: \${status:-empty}"
+	return 1
+}
+
+log "Safe shutdown started; preparing serial UPS shutdown-return path"
 
 /bin/umount / >/dev/null 2>&1 || true
 
@@ -942,7 +907,7 @@ UpsMode="\$(/bin/get_key_value "\$SYNOUPS_CONF" ups_mode 2>/dev/null || true)"
 [ -n "\$UpsMode" ] || UpsMode="usb"
 
 if [ "\$UpsMode" = "usb" ]; then
-	"\$STACK_SCRIPT" start || logger -p user.err -t ch341-ups "Could not restart serial UPS stack during safe shutdown"
+	"\$STACK_SCRIPT" start || log "Could not restart serial UPS stack during safe shutdown"
 elif [ "\$UpsMode" = "snmp" ] || [ "\$UpsMode" = "slave" ]; then
 	/usr/syno/lib/systemd/scripts/ups-net.sh start
 fi
@@ -950,7 +915,16 @@ fi
 /usr/syno/bin/scemd &
 sleep 2
 
-logger -p user.err -t ch341-ups "Calling Synology UPS output shutdown command"
+if ! ups_output_shutdown_enabled; then
+	log "DSM UPS output shutdown is disabled; skipping UPS output shutdown command"
+	exit 0
+fi
+
+if ! is_on_battery; then
+	exit 0
+fi
+
+log "Calling Synology UPS output shutdown command"
 /usr/syno/bin/synoups shutdownups
 EOF
 	chown root:root "$SAFE_SHUTDOWN_SCRIPT" || true
@@ -1061,9 +1035,9 @@ NAS kernel: $(uname -a)
 - \`upssched\` uses \`$UPSSCHED_CMD_SCRIPT\` as its command script for battery-mode and mains-restored notifications.
 - The watchdog is a DSM systemd timer, not a separate always-running process.
 - It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby shutdown path.
-- It reads DSM's UPS wait time and UPS-output-shutdown setting at runtime, so UI changes are used without reinstalling.
-- \`ups_safeshutdown\` is set to \`$SHUTDOWN_UPS\`. This remains enabled for DSM consistency, but the primary output-cut command is now sent before DSM enters Safe/Standby Mode.
-- \`safe-shutdown.service\` has a drop-in that runs \`$SAFE_SHUTDOWN_SCRIPT\` instead of Synology's original safe-shutdown script. The wrapper preserves Synology's final \`synoups shutdownups\` call, but uses the serial-aware UPS startup path first. This matters because Synology's original script calls \`ups-usb.sh start\` directly, and that script rewrites the serial UPS port to \`auto\`.
+- It reads DSM's UPS wait time at runtime. It does not send the UPS output-cut command.
+- \`ups_safeshutdown\` is set to \`$SHUTDOWN_UPS\`. The watchdog does not send the UPS output-cut command before DSM enters Safe/Standby Mode; it only requests DSM Safe Mode after the configured wait time.
+- \`safe-shutdown.service\` has a drop-in that runs \`$SAFE_SHUTDOWN_SCRIPT\` instead of Synology's original safe-shutdown script. This is the safe-shutdown wrapper: it runs late in DSM's Safe/Standby shutdown path, after DSM has started stopping services and protecting volumes. The wrapper uses the serial-aware UPS startup path first, then preserves the Synology \`synoups shutdownups\` behavior only if DSM's UPS-output-shutdown setting is enabled and live UPS status is still \`OB\` or \`LB\`. This matters because Synology's original script calls \`ups-usb.sh start\` directly, and that script rewrites the serial UPS port to \`auto\`.
 - The NUT driver is configured with \`offdelay = $UPS_OFF_DELAY_SECONDS\` and \`ondelay = $UPS_ON_DELAY_SECONDS\`. Because \`stayoff\` is not set, \`nutdrv_qx\` uses its normal return behavior: shut the load off, then turn it back on after mains power has returned. The exact behavior must be verified with a controlled outage test, because some low-cost UPS firmware ignores parts of the command.
 - The UPS does not report battery charge/runtime/model fields directly. The config supplies NUT fallback values so DSM can display a normal USB UPS. Battery charge is an estimate, and displayed runtime is aligned with the configured DSM wait time; shutdown still uses the fixed timer.
 - The healthcheck is a DSM systemd timer, not a separate always-running process.
@@ -1116,10 +1090,10 @@ systemctl status ch341-ups-watchdog.service --no-pager
    With no critical writes running, unplug the UPS input from wall power but keep the NAS plugged into the UPS. Within one or two polling intervals, \`/usr/bin/upsc ups@localhost ups.status\` should show \`OB\`. Plug wall power back in before the configured DSM wait time expires; status should return to \`OL\`, and DSM should not enter Safe Mode.
 
 5. Full Safe/Standby Mode test:
-   Only run this when it is acceptable for DSM to stop services. Unplug the UPS input from wall power and wait longer than the configured DSM wait time. Expected: the watchdog sends UPS shutdown-return as root, then DSM enters Safe/Standby Mode. Around \`$UPS_OFF_DELAY_SECONDS\` seconds after the shutdown-return command, UPS output should cut. Restore wall power. The UPS should turn output back on, and the NAS should start because automatic restart after power failure is enabled in Hardware & Power -> General.
+   Only run this when it is acceptable for DSM to stop services. Unplug the UPS input from wall power and wait longer than the configured DSM wait time. Expected: the watchdog requests DSM Safe/Standby Mode without pre-arming UPS output shutdown. When \`safe-shutdown.service\` runs \`$SAFE_SHUTDOWN_SCRIPT\`, the wrapper re-checks live UPS status; if it is still \`OB\` or \`LB\`, Synology sends shutdown-return and UPS output should cut around \`$UPS_OFF_DELAY_SECONDS\` seconds later. Restore wall power. The UPS should turn output back on, and the NAS should start because automatic restart after power failure is enabled in Hardware & Power -> General.
 
 6. Shortened full-flow test:
-   For a faster controlled test, temporarily set the DSM UPS wait time to 1 minute in Control Panel, unplug the UPS input, and wait for Safe/Standby Mode plus UPS output shutoff. With the default \`offdelay\`, output cut can take about 5 minutes after the 1-minute timer fires. Restore wall power and confirm the NAS starts. After the test, restore the normal wait time in DSM.
+   For a faster controlled test, temporarily set the DSM UPS wait time to 1 minute in Control Panel, unplug the UPS input, and wait for Safe/Standby Mode plus UPS output shutoff. With the default \`offdelay\`, output cut can take about 5 minutes after \`safe-shutdown.service\` runs \`$SAFE_SHUTDOWN_SCRIPT\`. Restore wall power and confirm the NAS starts. After the test, restore the normal wait time in DSM.
 
 7. DSM update test:
    After any DSM update, run \`$STACK_SCRIPT status\` and \`$HEALTH_SCRIPT\`. If the kernel version changed and \`ch341.ko\` no longer matches, the healthcheck should notify administrators and the module must be rebuilt for the new kernel.
@@ -1131,7 +1105,7 @@ systemctl status ch341-ups-watchdog.service --no-pager
 - The module is loaded from \`/usr/local\` with \`insmod\`.
 - Minor DSM updates that keep the same \`uname -r\` should usually keep working.
 - DSM updates that change the running kernel ABI can make \`ch341.ko\` fail to load. The healthcheck detects this by comparing module \`vermagic\` with \`uname -r\` and sends an alert instead of failing silently.
-- If the UPS returns AC before it cuts output, DSM's stock UPS client can reboot from Safe/Standby Mode. If DSM has told the UPS to cut output, startup after output returns depends on Control Panel -> Hardware & Power -> General -> automatic restart after power failure.
+- If AC returns before \`$SAFE_SHUTDOWN_SCRIPT\` sends shutdown-return, UPS output shutdown is skipped. If DSM has already told the UPS to cut output, startup after output returns depends on Control Panel -> Hardware & Power -> General -> automatic restart after power failure.
 EOF
 	chown "$DOC_USER":users "$doc" >/dev/null 2>&1 || true
 	chmod 644 "$doc" || true
