@@ -2,8 +2,8 @@
 set -eu
 
 # Public environment:
-#   WAIT_SECONDS            Initial DSM UPS wait time written at install.
-#   SHUTDOWN_UPS            yes/no default for DSM UPS output shutdown.
+#   WAIT_SECONDS            Default DSM UPS wait time used if DSM has no valid setting.
+#   SHUTDOWN_UPS            yes/no default used if DSM has no valid UPS output shutdown setting.
 #   UPS_OFF_DELAY_SECONDS   NUT offdelay before UPS output cutoff.
 #   UPS_ON_DELAY_SECONDS    NUT ondelay before UPS output restore.
 #   UPS_NAME                Local NUT UPS name. Default: ups.
@@ -326,7 +326,7 @@ EOU
 	chmod 640 "$UPSD_USERS" "$UPSMON_CONF" "$UPSSCHED_CONF" || true
 }
 
-configure_synology() {
+configure_synology_runtime() {
 	mkdir -p "\$(dirname "\$SYNOUPS_CONF")"
 	[ -e "\$SYNOUPS_CONF" ] || : > "\$SYNOUPS_CONF"
 	chown root:root "\$SYNOUPS_CONF" || true
@@ -335,8 +335,20 @@ configure_synology() {
 	/usr/syno/bin/synosetkeyvalue "\$SYNOUPS_CONF" ups_enabled yes
 	/usr/syno/bin/synosetkeyvalue "\$SYNOUPS_CONF" upsslave_enabled no
 	/usr/syno/bin/synosetkeyvalue "\$SYNOUPS_CONF" ups_mode usb
-	/usr/syno/bin/synosetkeyvalue "\$SYNOUPS_CONF" ups_wait_time "\$WAIT_SECONDS"
-	/usr/syno/bin/synosetkeyvalue "\$SYNOUPS_CONF" ups_safeshutdown "\$SHUTDOWN_UPS"
+	current_wait="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_wait_time 2>/dev/null || true)"
+	case "\$current_wait" in
+		""|*[!0-9]*)
+			/usr/syno/bin/synosetkeyvalue "\$SYNOUPS_CONF" ups_wait_time "\$WAIT_SECONDS"
+			;;
+	esac
+	current_safe="\$(/usr/syno/bin/synogetkeyvalue "\$SYNOUPS_CONF" ups_safeshutdown 2>/dev/null || true)"
+	case "\$current_safe" in
+		yes|no)
+			;;
+		*)
+			/usr/syno/bin/synosetkeyvalue "\$SYNOUPS_CONF" ups_safeshutdown "\$SHUTDOWN_UPS"
+			;;
+	esac
 }
 
 start_stack() {
@@ -345,7 +357,7 @@ start_stack() {
 	[ -n "\$tty_dev" ] || die "CH341 USB serial device \$VID:\$PID did not appear as /dev/ttyUSB*"
 	ensure_scan_entry
 	write_ups_conf "\$tty_dev"
-	configure_synology
+	configure_synology_runtime
 	configure_stock_nut_files
 	mkdir -p /run/ups_state /tmp/ups
 	systemctl stop ups-net.service >/dev/null 2>&1 || true
@@ -1031,15 +1043,15 @@ NAS kernel: $(uname -a)
 - \`$STACK_SCRIPT\` loads \`ch341.ko\`, finds the CH341-backed \`/dev/ttyUSB*\`, writes the DSM NUT config for \`nutdrv_qx\`, and starts the stock NUT daemons directly.
 - Synology's original \`ups-usb.sh start\` wrapper is intentionally bypassed for startup because it rewrites \`port\` to \`auto\`, which breaks this serial UPS.
 - The udev rule restarts \`ups-usb.service\` if the UPS serial TTY is replugged.
-- DSM wait time is set to \`$WAIT_SECONDS\` seconds.
+- If DSM has no valid UPS wait time, the startup path initializes it to \`$WAIT_SECONDS\` seconds; otherwise DSM UI changes are preserved.
 - \`upssched\` uses \`$UPSSCHED_CMD_SCRIPT\` as its command script for battery-mode and mains-restored notifications.
 - The watchdog is a DSM systemd timer, not a separate always-running process.
 - It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby shutdown path.
 - It reads DSM's UPS wait time at runtime. It does not send the UPS output-cut command.
-- \`ups_safeshutdown\` is set to \`$SHUTDOWN_UPS\`. The watchdog does not send the UPS output-cut command before DSM enters Safe/Standby Mode; it only requests DSM Safe Mode after the configured wait time.
+- If DSM has no valid \`ups_safeshutdown\` value, the startup path initializes it to \`$SHUTDOWN_UPS\`. The watchdog does not send the UPS output-cut command before DSM enters Safe/Standby Mode; it only requests DSM Safe Mode after the configured wait time.
 - \`safe-shutdown.service\` has a drop-in that runs \`$SAFE_SHUTDOWN_SCRIPT\` instead of Synology's original safe-shutdown script. This is the safe-shutdown wrapper: it runs late in DSM's Safe/Standby shutdown path, after DSM has started stopping services and protecting volumes. The wrapper uses the serial-aware UPS startup path first, then preserves the Synology \`synoups shutdownups\` behavior only if DSM's UPS-output-shutdown setting is enabled and live UPS status is still \`OB\` or \`LB\`. This matters because Synology's original script calls \`ups-usb.sh start\` directly, and that script rewrites the serial UPS port to \`auto\`.
 - The NUT driver is configured with \`offdelay = $UPS_OFF_DELAY_SECONDS\` and \`ondelay = $UPS_ON_DELAY_SECONDS\`. Because \`stayoff\` is not set, \`nutdrv_qx\` uses its normal return behavior: shut the load off, then turn it back on after mains power has returned. The exact behavior must be verified with a controlled outage test, because some low-cost UPS firmware ignores parts of the command.
-- The UPS does not report battery charge/runtime/model fields directly. The config supplies NUT fallback values so DSM can display a normal USB UPS. Battery charge is an estimate, and displayed runtime is aligned with the configured DSM wait time; shutdown still uses the fixed timer.
+- The UPS does not report battery charge/runtime/model fields directly. The config supplies NUT fallback values so DSM can display a normal USB UPS. Battery charge/runtime are estimates; shutdown uses DSM's configured fixed wait time, not the displayed runtime estimate.
 - The healthcheck is a DSM systemd timer, not a separate always-running process.
 - It runs 5 minutes after boot and every 15 minutes after that. It checks live UPS monitoring plus the persistent boot hook, UPS service drop-in, scheduler wrapper, watchdog timer, safe-shutdown drop-in, DSM wait time, and DSM UPS-output-shutdown flag.
 - User-visible UPS notifications use DSM's stock Power supply events. A successful stack start emits \`The UPS has been connected\`; battery, low-battery, AC-return, USB-removal, and persistent healthcheck failure paths also use stock DSM UPS events.
@@ -1055,9 +1067,9 @@ NAS kernel: $(uname -a)
 - Control Panel -> Hardware & Power -> UPS:
   - UPS support should be enabled.
   - UPS type should show USB UPS.
-  - Time before entering Standby/Safe Mode should match the intended UPS wait time. The install default is 15 minutes.
+  - Time before entering Standby/Safe Mode should match the intended UPS wait time. The fallback default is 15 minutes only when DSM has no valid saved setting.
   - "Shut down UPS when the system enters Standby Mode" should be checked if you want to avoid fully draining the UPS battery during long outages.
-- If you change UPS settings in Control Panel and DSM restarts its own wrapper, run \`systemctl restart ch341-ups.service\` afterward. The healthcheck will also try to recover this automatically.
+- UPS wait time and UPS-output-shutdown changes made in Control Panel are preserved across UPS service restarts and are read at runtime.
 
 ## Useful Commands
 

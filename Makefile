@@ -5,7 +5,7 @@ SHELL := /bin/sh
 #   DSM_USER                DSM user used for SSH and sudo.
 #   SSH_TARGET              Full SSH target. Default: DSM_USER@NAS.
 #   MODULE                  Built ch341.ko path used by install.
-#   WAIT_SECONDS            Initial DSM UPS wait time written by install.
+#   WAIT_SECONDS            Default DSM UPS wait time used if DSM has no valid setting.
 #   UPS_OFF_DELAY_SECONDS   UPS delay before cutting output after shutdown-return.
 #   UPS_ON_DELAY_SECONDS    UPS delay before restoring output after mains returns.
 #   SCP                     File-copy command used for NAS transfers.

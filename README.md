@@ -132,7 +132,7 @@ export UPS_ON_DELAY_SECONDS=180
 - `NAS` is only the NAS hostname or SSH host alias used by `install`, `check`,
   and `probe`.
 - `DSM_USER` is the DSM account used for SSH login and sudo authorization.
-- `WAIT_SECONDS` is only the initial DSM UPS wait time written during install. Later UI changes are respected.
+- `WAIT_SECONDS` is the default DSM UPS wait time used only if DSM has no valid saved setting. Later UI changes are respected.
 - `UPS_OFF_DELAY_SECONDS` and `UPS_ON_DELAY_SECONDS` configure UPS output cutoff/restore delays.
 
 #### Passwordless Access Configuration (Mandatory)
@@ -233,7 +233,7 @@ rules decide which delivery channels receive them.
 
 - Control Panel -> Hardware & Power -> UPS -> Enable UPS support: enabled.
 - UPS type: `USB UPS`.
-- Time before Synology NAS enters Standby Mode: `Customize time`; default install value is 15 minutes.
+- Time before Synology NAS enters Standby Mode: `Customize time`; the fallback default is 15 minutes only when DSM has no valid saved setting.
 - `Shut down UPS when the system enters Standby Mode`: checked if the UPS should cut output after DSM enters Safe/Standby Mode.
 - `Until low battery`: not recommended for this UPS class because battery/runtime reporting is not reliable enough for the shutdown policy.
 
