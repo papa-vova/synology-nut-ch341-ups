@@ -807,7 +807,7 @@ UPS_NAME="$UPS_NAME"
 SYNOUPS_CONF="$SYNOUPS_CONF"
 STACK_SCRIPT="$STACK_SCRIPT"
 SAFE_DOWN_MARKER="/tmp/ups.safedown"
-SAFE_TARGET_GRACE_SECONDS=20
+SAFE_TARGET_GRACE_SECONDS=300
 SHUTDOWN_RETRIES=3
 RETRY_SLEEP_SECONDS=40
 LOG_TAG="ch341-ups"
@@ -893,7 +893,7 @@ while ! safe_mode_started; do
 	waited=\$((waited + 5))
 done
 
-log "DSM Safe/Standby Mode detected; waiting briefly for DSM safe-shutdown target"
+log "DSM Safe/Standby Mode detected; waiting up to 300s for DSM safe-shutdown target"
 wait_for_safe_shutdown_target_or_grace
 
 if ! is_on_battery; then
@@ -1499,7 +1499,7 @@ NAS kernel: $(uname -a)
 - The watchdog is a DSM systemd timer, not a separate always-running process.
 - It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby shutdown path.
 - It reads DSM's UPS wait time at runtime. Wait-time expiry and low-battery/FSD events request DSM Safe/Standby Mode and start the output-shutdown helper.
-- If DSM has no valid \`ups_safeshutdown\` value, the startup path initializes it to \`$SHUTDOWN_UPS\`. The output-shutdown helper reads that setting at runtime, briefly waits for DSM's UPS safe-shutdown target, re-checks live UPS status, and only asks NUT to cut output if the UPS is still \`OB\` or \`LB\`.
+- If DSM has no valid \`ups_safeshutdown\` value, the startup path initializes it to \`$SHUTDOWN_UPS\`. The output-shutdown helper reads that setting at runtime, waits up to 5 minutes for DSM's UPS safe-shutdown target, re-checks live UPS status, and only asks NUT to cut output if the UPS is still \`OB\` or \`LB\`.
 - \`safe-shutdown.service\` has a drop-in that runs \`$SAFE_SHUTDOWN_SCRIPT\` instead of Synology's original safe-shutdown script. This compatibility path preserves Synology's \`synoups shutdownups\` behavior for DSM flows that run the safe-shutdown service directly.
 - The NUT driver is configured with \`offdelay = $UPS_OFF_DELAY_SECONDS\` and \`ondelay = $UPS_ON_DELAY_SECONDS\`. Because \`stayoff\` is not set, \`nutdrv_qx\` uses its normal return behavior: shut the load off, then turn it back on after mains power has returned. The exact behavior must be verified with a controlled outage test, because some low-cost UPS firmware ignores parts of the command.
 - The UPS does not report battery charge/runtime/model fields directly. The config supplies NUT fallback values so DSM can display a normal USB UPS. Battery charge/runtime are estimates; shutdown uses DSM's configured fixed wait time, not the displayed runtime estimate.

@@ -38,7 +38,7 @@ The setup stays as close as practical to stock DSM:
 
 #### Output Shutdown
 
-- After DSM Safe/Standby Mode starts, the output-shutdown helper briefly waits for DSM's UPS safe-shutdown target, then reads DSM's UPS-output-shutdown setting and re-checks live UPS status.
+- After DSM Safe/Standby Mode starts, the output-shutdown helper waits up to 5 minutes for DSM's UPS safe-shutdown target, then reads DSM's UPS-output-shutdown setting and re-checks live UPS status.
 - If the setting is enabled and the UPS is still `OB` or `LB`, it asks NUT to perform the configured UPS output shutdown using `offdelay` and `ondelay`.
 - A `safe-shutdown.service` drop-in remains installed as a compatibility path for DSM flows that run Synology's safe-shutdown service directly.
 
@@ -73,7 +73,7 @@ sequenceDiagram
     W-->>D: request Safe/Standby Mode
     W-->>O: start output-shutdown helper
     D->>D: stop services and protect volumes
-    O->>O: wait briefly for safe target, then re-check UPS status
+    O->>O: wait up to 5 minutes for safe target, then re-check UPS status
     alt still on battery
       O-->>U: request shutdown-return
       U->>U: wait offdelay, then cut output
@@ -237,7 +237,7 @@ rules decide which delivery channels receive them.
 - `Shut down UPS when the system enters Standby Mode`: checked if the UPS should cut output after DSM enters Safe/Standby Mode.
 - `Until low battery`: not recommended for this UPS class because battery/runtime reporting is not reliable enough for the shutdown policy.
 
-The watchdog reads DSM's UPS wait time at runtime. The output-shutdown helper is started when DSM Safe/Standby Mode is requested by wait-time expiry or low battery, briefly waits for DSM's UPS safe-shutdown target, reads the UPS-output-shutdown setting, and re-checks that the UPS is still on battery before asking NUT to cut output. Changing those two UI settings does not require reinstalling.
+The watchdog reads DSM's UPS wait time at runtime. The output-shutdown helper is started when DSM Safe/Standby Mode is requested by wait-time expiry or low battery, waits up to 5 minutes for DSM's UPS safe-shutdown target, reads the UPS-output-shutdown setting, and re-checks that the UPS is still on battery before asking NUT to cut output. Changing those two UI settings does not require reinstalling.
 
 ### Build And Install
 
