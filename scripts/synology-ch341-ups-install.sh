@@ -1256,6 +1256,8 @@ systemctl status ch341-ups-watchdog.service --no-pager
 - Low battery: low-battery event.
 - UPS disconnected/unavailable: UPS-disconnected event.
 - DSM UPS settings changes are settings changes only.
+- Power-state events use the single DSM-facing path: \`upsmon EXEC -> upssched -> wrapper -> synoups -> DSM stock UPS event\`.
+- \`SYSLOG\`/\`WALL\` are not enabled for those events on DSM, because they can create duplicate DSM notifications outside the \`synoups\` path.
 - The last observed power state is kept in \`/run/ch341-ups-power.state\` across service restarts; it resets on NAS boot.
 
 ## Test Plan
