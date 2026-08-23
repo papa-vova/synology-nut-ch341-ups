@@ -208,6 +208,7 @@ BACKUP_SUFFIX="$BACKUP_SUFFIX"
 LOG_TAG="$LOG_TAG"
 UPS_PLUGIN_NOTIFY_SERVICE="ups-plugin-notify.service"
 CONNECTED_STATE_FILE="$CONNECTED_STATE_FILE"
+POWER_STATE_FILE="$POWER_STATE_FILE"
 
 log() {
 	logger -p user.info -t "\$LOG_TAG" "\$*" 2>/dev/null || true
@@ -229,7 +230,8 @@ die() {
 }
 
 ups_monitoring_readable() {
-	/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status >/dev/null 2>&1
+	status="\$(current_ups_status)"
+	valid_ups_status_value "\$status"
 }
 
 emit_connected_event_after_start() {
@@ -246,6 +248,74 @@ mark_connected() {
 
 clear_connected() {
 	rm -f "\$CONNECTED_STATE_FILE" 2>/dev/null || true
+}
+
+current_ups_status() {
+	/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || true
+}
+
+valid_ups_status_value() {
+	case "\$1" in
+		OL*|OB*|LB*)
+			return 0
+			;;
+	esac
+	return 1
+}
+
+power_state_from_status_value() {
+	case "\$1" in
+		*LB*)
+			printf '%s\n' lowbattery
+			;;
+		*OB*)
+			printf '%s\n' battery
+			;;
+		OL*)
+			printf '%s\n' line
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+write_power_state() {
+	printf '%s\n' "\$1" > "\$POWER_STATE_FILE" 2>/dev/null || true
+}
+
+is_monitoring_on_battery() {
+	status="\$(current_ups_status)"
+	case "\$status" in
+		*OB*|*LB*)
+			return 0
+			;;
+	esac
+	return 1
+}
+
+running_driver_port() {
+	/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" driver.parameter.port 2>/dev/null || true
+}
+
+preserve_running_stack_if_healthy() {
+	tty_dev="\$1"
+	status="\$(current_ups_status)"
+	if ! valid_ups_status_value "\$status"; then
+		return 1
+	fi
+	driver_port="\$(running_driver_port)"
+	if [ "\$driver_port" != "\$tty_dev" ]; then
+		log "Running UPS monitor uses \${driver_port:-empty}; expected \$tty_dev, restarting NUT daemons"
+		return 1
+	fi
+	power_state="\$(power_state_from_status_value "\$status" || true)"
+	if [ -n "\$power_state" ]; then
+		write_power_state "\$power_state"
+	fi
+	mark_connected
+	log "UPS monitoring already healthy via \$tty_dev (\$status); preserving running NUT daemons"
+	return 0
 }
 
 backup_once() {
@@ -426,6 +496,9 @@ start_stack() {
 	write_ups_conf "\$tty_dev"
 	configure_synology_runtime
 	configure_stock_nut_files
+	if preserve_running_stack_if_healthy "\$tty_dev"; then
+		return 0
+	fi
 	mkdir -p /run/ups_state /tmp/ups
 	systemctl stop ups-net.service >/dev/null 2>&1 || true
 	/usr/syno/lib/systemd/scripts/ups-usb.sh stop >/dev/null 2>&1 || true
@@ -455,6 +528,10 @@ start_stack() {
 }
 
 stop_stack() {
+	if is_monitoring_on_battery; then
+		log "UPS is on battery; preserving running NUT daemons during service stop"
+		return 0
+	fi
 	/usr/syno/lib/systemd/scripts/ups-usb.sh stop >/dev/null 2>&1 || true
 }
 
@@ -1256,6 +1333,7 @@ systemctl status ch341-ups-watchdog.service --no-pager
 - Low battery: low-battery event.
 - UPS disconnected/unavailable: UPS-disconnected event.
 - DSM UPS settings changes are settings changes only.
+- During battery mode, settings changes preserve the already-running UPS monitor instead of restarting it.
 - Power-state events use the single DSM-facing path: \`upsmon EXEC -> upssched -> wrapper -> synoups -> DSM stock UPS event\`.
 - \`SYSLOG\`/\`WALL\` are not enabled for those events on DSM, because they can create duplicate DSM notifications outside the \`synoups\` path.
 - The last observed power state is kept in \`/run/ch341-ups-power.state\` across service restarts; it resets on NAS boot.
