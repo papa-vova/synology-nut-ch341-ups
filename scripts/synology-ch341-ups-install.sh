@@ -765,8 +765,8 @@ case "\${1:-}" in
 	waittimeup)
 		if is_on_battery; then
 			touch "\$SAFEMODE_REQUESTED"
-			log "UPS scheduler wait time reached; requesting DSM Safe Mode without pre-arming UPS output shutdown"
-			pass_to_synology lowbatt
+			log "UPS scheduler wait time reached; requesting DSM Safe Mode through Synology wait-time-expired path"
+			pass_to_synology waittimeup
 		fi
 		;;
 	*)
@@ -870,9 +870,9 @@ if [ -e "\$SAFEMODE_REQUESTED" ]; then
 fi
 
 touch "\$SAFEMODE_REQUESTED"
-log "UPS watchdog battery timer reached \${elapsed}s (configured wait \${wait_seconds}s); requesting DSM Safe Mode without pre-arming UPS output shutdown"
+log "UPS watchdog battery timer reached \${elapsed}s (configured wait \${wait_seconds}s); requesting DSM Safe Mode through Synology wait-time-expired path"
 
-"\$SYNOUPS" lowbatt || log "UPS watchdog: Synology lowbatt Safe Mode command failed"
+"\$SYNOUPS" waittimeup || log "UPS watchdog: Synology wait-time-expired Safe Mode command failed"
 EOF
 	chown root:root "$WATCHDOG_SCRIPT" || true
 	chmod 755 "$WATCHDOG_SCRIPT"
@@ -1336,7 +1336,8 @@ systemctl status ch341-ups-watchdog.service --no-pager
 - UPS monitoring connect/recovery: UPS-connected event.
 - Mains input loss: battery-mode event.
 - Mains input restored: AC-return event.
-- Low battery: low-battery event.
+- Low battery: low-battery event when the UPS/NUT reports low battery.
+- DSM wait-time expiry enters Safe/Standby Mode; it is not treated as a low-battery notification.
 - UPS disconnected/unavailable: UPS-disconnected event.
 - DSM UPS settings changes are settings changes only; when monitoring is already healthy, they preserve the already-running UPS monitor instead of restarting it.
 - Power-state events use the single DSM-facing path: \`upsmon EXEC -> upssched -> wrapper -> synoups -> DSM stock UPS event\`.

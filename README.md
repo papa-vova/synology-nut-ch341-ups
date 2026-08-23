@@ -266,7 +266,8 @@ make install
 - UPS monitoring connect/recovery: UPS-connected event.
 - Mains input loss: battery-mode event.
 - Mains input restored: AC-return event.
-- Low battery: low-battery event.
+- Low battery: low-battery event when the UPS/NUT reports low battery.
+- DSM wait-time expiry enters Safe/Standby Mode; it is not treated as a low-battery notification.
 - UPS disconnected/unavailable: UPS-disconnected event.
 - DSM UPS settings changes are settings changes only; when monitoring is already healthy, they preserve the already-running UPS monitor instead of restarting it.
 - Power-state events use the single DSM-facing path: `upsmon EXEC -> upssched -> wrapper -> synoups -> DSM stock UPS event`.

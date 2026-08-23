@@ -16,13 +16,19 @@ usage() {
 
 [ -n "$target" ] || usage
 
-ssh "$target" 'sh -s' <<'REMOTE'
+ssh -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=1 "$target" 'sh -s' <<'REMOTE'
 set +e
 
 fail=0
 
 first_line() {
   printf '%s\n' "$1" | sed -n '1p'
+}
+
+first_line_or_timeout() {
+  value="$1"
+  [ -n "$value" ] || value="timed out"
+  first_line "$value"
 }
 
 ok() {
@@ -118,16 +124,16 @@ else
   bad "DSM UPS output shutdown" "not readable"
 fi
 
-synoups_status="$(sudo /usr/syno/bin/synoups status 2>&1)"
+synoups_status="$(/usr/bin/timeout 8 sudo /usr/syno/bin/synoups status 2>&1)"
 case "$synoups_status" in
   *OL*|*OB*|*LB*) ok "DSM UPS status" "$(first_line "$synoups_status")" ;;
-  *) bad "DSM UPS status" "$(first_line "$synoups_status")" ;;
+  *) bad "DSM UPS status" "$(first_line_or_timeout "$synoups_status")" ;;
 esac
 
-nut_status="$(/usr/bin/upsc ups@localhost ups.status 2>&1)"
+nut_status="$(/usr/bin/timeout 8 /usr/bin/upsc ups@localhost ups.status 2>&1)"
 case "$nut_status" in
   *OL*|*OB*|*LB*) ok "NUT UPS status" "$(first_line "$nut_status")" ;;
-  *) bad "NUT UPS status" "$(first_line "$nut_status")" ;;
+  *) bad "NUT UPS status" "$(first_line_or_timeout "$nut_status")" ;;
 esac
 
 if [ "$fail" -eq 0 ]; then
