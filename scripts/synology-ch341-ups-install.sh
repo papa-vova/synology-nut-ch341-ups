@@ -89,6 +89,7 @@ UPSSCHED_CONF="/etc/ups/upssched.conf"
 NUTSCAN_USB="/etc/ups/nutscan-usb.h"
 BACKUP_SUFFIX=".ch341ups-bak"
 LOG_TAG="${LOG_TAG:-ch341-ups}"
+CONNECTED_STATE_FILE="${CONNECTED_STATE_FILE:-/run/ch341-ups-connected.state}"
 
 log() {
 	logger -p user.info -t "$LOG_TAG" "$*" 2>/dev/null || true
@@ -111,6 +112,23 @@ die() {
 
 require_root() {
 	[ "$(id -u)" = "0" ] || die "run as root"
+}
+
+valid_ups_status_value() {
+	case "$1" in
+		OL*|OB*|LB*)
+			return 0
+			;;
+	esac
+	return 1
+}
+
+seed_connected_state_for_upgrade() {
+	status="$(/usr/bin/timeout 8 /usr/bin/upsc "$UPS_NAME@localhost" ups.status 2>/dev/null || true)"
+	if valid_ups_status_value "$status"; then
+		touch "$CONNECTED_STATE_FILE" 2>/dev/null || true
+		log "Existing UPS monitoring is already connected; service restart will not emit a connected notification"
+	fi
 }
 
 backup_once() {
@@ -167,6 +185,7 @@ NUTSCAN_USB="$NUTSCAN_USB"
 BACKUP_SUFFIX="$BACKUP_SUFFIX"
 LOG_TAG="$LOG_TAG"
 UPS_PLUGIN_NOTIFY_SERVICE="ups-plugin-notify.service"
+CONNECTED_STATE_FILE="$CONNECTED_STATE_FILE"
 
 log() {
 	logger -p user.info -t "\$LOG_TAG" "\$*" 2>/dev/null || true
@@ -185,6 +204,26 @@ die() {
 	logger -p user.err -t "\$LOG_TAG" "\$*" 2>/dev/null || true
 	printf 'ERROR: %s\n' "\$*" >&2
 	exit 1
+}
+
+ups_monitoring_readable() {
+	/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status >/dev/null 2>&1
+}
+
+emit_connected_event_after_start() {
+	if [ -e "\$CONNECTED_STATE_FILE" ]; then
+		log "UPS monitoring was already connected; not emitting connected notification"
+		return 0
+	fi
+	systemctl --no-block restart "\$UPS_PLUGIN_NOTIFY_SERVICE" >/dev/null 2>&1 || true
+}
+
+mark_connected() {
+	touch "\$CONNECTED_STATE_FILE" 2>/dev/null || true
+}
+
+clear_connected() {
+	rm -f "\$CONNECTED_STATE_FILE" 2>/dev/null || true
 }
 
 backup_once() {
@@ -354,7 +393,10 @@ configure_synology_runtime() {
 start_stack() {
 	load_module
 	tty_dev="\$(find_ch341_tty || true)"
-	[ -n "\$tty_dev" ] || die "CH341 USB serial device \$VID:\$PID did not appear as /dev/ttyUSB*"
+	if [ -z "\$tty_dev" ]; then
+		clear_connected
+		die "CH341 USB serial device \$VID:\$PID did not appear as /dev/ttyUSB*"
+	fi
 	ensure_scan_entry
 	write_ups_conf "\$tty_dev"
 	configure_synology_runtime
@@ -372,9 +414,10 @@ start_stack() {
 	/usr/sbin/upsmon
 	i=0
 	while [ "\$i" -lt 20 ]; do
-		if /usr/bin/upsc "\$UPS_NAME@localhost" ups.status >/dev/null 2>&1; then
+		if ups_monitoring_readable; then
 			log "Synology UPS USB service is reading \$UPS_NAME@localhost via \$tty_dev"
-			systemctl --no-block restart "\$UPS_PLUGIN_NOTIFY_SERVICE" >/dev/null 2>&1 || true
+			emit_connected_event_after_start
+			mark_connected
 			return 0
 		fi
 		i=\$((i + 1))
@@ -382,6 +425,7 @@ start_stack() {
 	done
 	/usr/bin/upsc "\$UPS_NAME@localhost" 2>&1 || true
 	ps aux | grep -E 'nutdrv_qx|upsd|upsmon|upssched' | grep -v grep || true
+	clear_connected
 	die "Synology UPS USB service started but \$UPS_NAME@localhost is not readable"
 }
 
@@ -480,7 +524,7 @@ write_udev_rule() {
 	mkdir -p "$(dirname "$UDEV_RULE")"
 cat > "$UDEV_RULE" <<EOF
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ATTRS{idVendor}=="$VID", ATTRS{idProduct}=="$PID", RUN+="/bin/systemctl restart ups-usb.service"
-ACTION=="remove", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", RUN+="/bin/systemctl --no-block restart ups-plugout-notify.service"
+ACTION=="remove", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", RUN+="/bin/sh -c 'rm -f $CONNECTED_STATE_FILE; /bin/systemctl --no-block restart ups-plugout-notify.service'"
 EOF
 	chown root:root "$UDEV_RULE" || true
 	chmod 644 "$UDEV_RULE"
@@ -710,6 +754,7 @@ UPSMON_CONF="$UPSMON_CONF"
 SYNOUPS_CONF="$SYNOUPS_CONF"
 UDEV_RULE="$UDEV_RULE"
 FAIL_STAMP="/run/ch341-ups-health.failed"
+CONNECTED_STATE_FILE="$CONNECTED_STATE_FILE"
 
 issues=""
 
@@ -816,11 +861,16 @@ check_once() {
 if check_once; then
 	log "UPS monitoring healthy on \$(hostname)"
 	rm -f "\$FAIL_STAMP"
+	touch "\$CONNECTED_STATE_FILE" 2>/dev/null || true
 	exit 0
 fi
 
 first_issues="\$issues"
 
+current_status="\$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || true)"
+if ! valid_ups_status "\$current_status"; then
+	rm -f "\$CONNECTED_STATE_FILE" 2>/dev/null || true
+fi
 systemctl restart ch341-ups.service >/dev/null 2>&1 || true
 sleep 8
 
@@ -836,6 +886,7 @@ if ! ups_support_enabled; then
 fi
 
 systemctl --no-block restart "\$UPS_PLUGOUT_NOTIFY_SERVICE" >/dev/null 2>&1 || true
+rm -f "\$CONNECTED_STATE_FILE" 2>/dev/null || true
 log "UPS monitoring problem on \$(hostname). Current issue: \$issues. Before automatic restart: \$first_issues. If this began after a DSM update and a vermagic mismatch is reported, rebuild ch341.ko for the new DSM kernel. Check \\\`systemctl status ch341-ups.service\\\` and \\\`$STACK_SCRIPT status\\\`."
 touch "\$FAIL_STAMP"
 
@@ -1086,6 +1137,13 @@ systemctl status ch341-ups-healthcheck.service --no-pager
 systemctl status ch341-ups-watchdog.service --no-pager
 \`\`\`
 
+## Normal Notifications
+
+- UPS monitoring connect/recovery emits DSM's stock UPS-connected event.
+- Mains loss and return emit DSM's stock battery-mode and AC-return events.
+- USB removal or persistent monitoring failure emits DSM's stock UPS-disconnected event.
+- Changing DSM UPS settings may restart services, but it is not a UPS connection event.
+
 ## Test Plan
 
 1. Basic status test:
@@ -1142,6 +1200,7 @@ install() {
 	systemctl enable ch341-ups.service
 	systemctl enable ch341-ups-healthcheck.timer
 	systemctl enable ch341-ups-watchdog.timer
+	seed_connected_state_for_upgrade
 	systemctl restart ch341-ups.service
 	systemctl restart ch341-ups-healthcheck.timer
 	systemctl restart ch341-ups-watchdog.timer

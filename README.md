@@ -261,6 +261,13 @@ Install or update the UPS setup:
 make install
 ```
 
+### Normal Notifications
+
+- UPS monitoring connect/recovery emits DSM's stock UPS-connected event.
+- Mains loss and return emit DSM's stock battery-mode and AC-return events.
+- USB removal or persistent monitoring failure emits DSM's stock UPS-disconnected event.
+- Changing DSM UPS settings may restart services, but it is not a UPS connection event.
+
 ### Testing
 
 #### Check
