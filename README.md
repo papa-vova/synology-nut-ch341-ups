@@ -46,7 +46,7 @@ The setup stays as close as practical to stock DSM:
 
 - The healthcheck is also a DSM systemd timer, not a separate always-running process.
 - `ch341-ups-healthcheck.timer` runs 5 minutes after boot and every 15 minutes after that. It checks the module, TTY, DSM service wiring, timers, NUT processes, DSM UPS settings, and live UPS status as shown in the monitoring sequence.
-- A successful UPS stack start emits DSM's stock `The UPS has been connected` event, including after boot.
+- UPS monitoring connect/recovery emits DSM's stock `The UPS has been connected` event.
 - If monitoring is still unavailable after an automatic restart attempt, the healthcheck emits DSM's stock `The UPS has been disconnected` event and logs the diagnostic details.
 
 ### Outage Sequence
@@ -263,10 +263,12 @@ make install
 
 ### Normal Notifications
 
-- UPS monitoring connect/recovery emits DSM's stock UPS-connected event.
-- Mains loss and return emit DSM's stock battery-mode and AC-return events.
-- USB removal or persistent monitoring failure emits DSM's stock UPS-disconnected event.
-- Changing DSM UPS settings may restart services, but it is not a UPS connection event.
+- UPS monitoring connect/recovery: UPS-connected event.
+- Mains input loss: battery-mode event.
+- Mains input restored: AC-return event.
+- Low battery: low-battery event.
+- UPS disconnected/unavailable: UPS-disconnected event.
+- DSM UPS settings changes are settings changes only.
 
 ### Testing
 

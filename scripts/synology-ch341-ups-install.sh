@@ -90,6 +90,7 @@ NUTSCAN_USB="/etc/ups/nutscan-usb.h"
 BACKUP_SUFFIX=".ch341ups-bak"
 LOG_TAG="${LOG_TAG:-ch341-ups}"
 CONNECTED_STATE_FILE="${CONNECTED_STATE_FILE:-/run/ch341-ups-connected.state}"
+POWER_STATE_FILE="${POWER_STATE_FILE:-/run/ch341-ups-power.state}"
 
 log() {
 	logger -p user.info -t "$LOG_TAG" "$*" 2>/dev/null || true
@@ -123,10 +124,31 @@ valid_ups_status_value() {
 	return 1
 }
 
+power_state_from_status_value() {
+	case "$1" in
+		*LB*)
+			printf '%s\n' lowbattery
+			;;
+		*OB*)
+			printf '%s\n' battery
+			;;
+		OL*)
+			printf '%s\n' line
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
 seed_connected_state_for_upgrade() {
 	status="$(/usr/bin/timeout 8 /usr/bin/upsc "$UPS_NAME@localhost" ups.status 2>/dev/null || true)"
 	if valid_ups_status_value "$status"; then
 		touch "$CONNECTED_STATE_FILE" 2>/dev/null || true
+		power_state="$(power_state_from_status_value "$status" || true)"
+		if [ -n "$power_state" ]; then
+			printf '%s\n' "$power_state" > "$POWER_STATE_FILE" 2>/dev/null || true
+		fi
 		log "Existing UPS monitoring is already connected; service restart will not emit a connected notification"
 	fi
 }
@@ -543,6 +565,7 @@ UPS_NAME="$UPS_NAME"
 SYNOUPS="/usr/syno/bin/synoups"
 LOG_TAG="ch341-ups"
 SAFEMODE_REQUESTED="/run/ch341-ups-safemode.requested"
+POWER_STATE_FILE="$POWER_STATE_FILE"
 
 log() {
 	logger -p user.err -t "\$LOG_TAG" "\$*"
@@ -550,6 +573,86 @@ log() {
 
 pass_to_synology() {
 	"\$SYNOUPS" "\$1" || log "Synology UPS command failed: \$1"
+}
+
+read_power_state() {
+	cat "\$POWER_STATE_FILE" 2>/dev/null || true
+}
+
+write_power_state() {
+	printf '%s\n' "\$1" > "\$POWER_STATE_FILE" 2>/dev/null || true
+}
+
+current_power_state() {
+	status="\$(/usr/bin/timeout 8 /usr/bin/upsc "\$UPS_NAME@localhost" ups.status 2>/dev/null || true)"
+	case "\$status" in
+		*LB*)
+			printf '%s\n' lowbattery
+			;;
+		*OB*)
+			printf '%s\n' battery
+			;;
+		OL*)
+			printf '%s\n' line
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+is_battery_state() {
+	[ "\$1" = "battery" ] || [ "\$1" = "lowbattery" ]
+}
+
+handle_onbatt() {
+	current="\$(current_power_state || true)"
+	if [ "\$current" = "line" ]; then
+		write_power_state line
+		log "Skipping battery-mode notification because current UPS power state is line"
+		return 0
+	fi
+	previous="\$(read_power_state)"
+	if is_battery_state "\$previous"; then
+		log "UPS power state already \$previous; not emitting duplicate battery-mode notification"
+		return 0
+	fi
+	write_power_state battery
+	pass_to_synology onbatt
+}
+
+handle_online() {
+	rm -f "\$SAFEMODE_REQUESTED"
+	current="\$(current_power_state || true)"
+	if [ -n "\$current" ] && [ "\$current" != "line" ]; then
+		write_power_state "\$current"
+		log "Skipping AC-return notification because current UPS power state is \$current"
+		return 0
+	fi
+	previous="\$(read_power_state)"
+	if [ -z "\$previous" ] || [ "\$previous" = "line" ]; then
+		write_power_state line
+		log "UPS power state already \${previous:-unknown}; not emitting duplicate AC-return notification"
+		return 0
+	fi
+	write_power_state line
+	pass_to_synology online
+}
+
+handle_lowbatt() {
+	current="\$(current_power_state || true)"
+	if [ "\$current" = "line" ]; then
+		write_power_state line
+		log "Skipping low-battery notification because current UPS power state is line"
+		return 0
+	fi
+	previous="\$(read_power_state)"
+	if [ "\$previous" = "lowbattery" ]; then
+		log "UPS power state already lowbattery; not emitting duplicate low-battery notification"
+		return 0
+	fi
+	write_power_state lowbattery
+	pass_to_synology lowbatt
 }
 
 is_on_battery() {
@@ -565,14 +668,16 @@ is_on_battery() {
 
 case "\${1:-}" in
 	onbatt)
-		pass_to_synology onbatt
+		handle_onbatt
 		;;
-	online|nocomm|fsd)
-		[ "\$1" = "online" ] && rm -f "\$SAFEMODE_REQUESTED"
+	online)
+		handle_online
+		;;
+	nocomm|fsd)
 		pass_to_synology "\$1"
 		;;
 	lowbatt)
-		pass_to_synology lowbatt
+		handle_lowbatt
 		;;
 	waittimeup)
 		if is_on_battery; then
@@ -1105,7 +1210,7 @@ NAS kernel: $(uname -a)
 - The UPS does not report battery charge/runtime/model fields directly. The config supplies NUT fallback values so DSM can display a normal USB UPS. Battery charge/runtime are estimates; shutdown uses DSM's configured fixed wait time, not the displayed runtime estimate.
 - The healthcheck is a DSM systemd timer, not a separate always-running process.
 - It runs 5 minutes after boot and every 15 minutes after that. It checks live UPS monitoring plus the persistent boot hook, UPS service drop-in, scheduler wrapper, watchdog timer, safe-shutdown drop-in, DSM wait time, and DSM UPS-output-shutdown flag.
-- User-visible UPS notifications use DSM's stock Power supply events. A successful stack start emits \`The UPS has been connected\`; battery, low-battery, AC-return, USB-removal, and persistent healthcheck failure paths also use stock DSM UPS events.
+- User-visible UPS notifications use DSM's stock Power supply events: UPS connected/recovered, battery mode, low battery, AC-return, and disconnected/unavailable.
 
 ## DSM Settings To Check
 
@@ -1139,10 +1244,12 @@ systemctl status ch341-ups-watchdog.service --no-pager
 
 ## Normal Notifications
 
-- UPS monitoring connect/recovery emits DSM's stock UPS-connected event.
-- Mains loss and return emit DSM's stock battery-mode and AC-return events.
-- USB removal or persistent monitoring failure emits DSM's stock UPS-disconnected event.
-- Changing DSM UPS settings may restart services, but it is not a UPS connection event.
+- UPS monitoring connect/recovery: UPS-connected event.
+- Mains input loss: battery-mode event.
+- Mains input restored: AC-return event.
+- Low battery: low-battery event.
+- UPS disconnected/unavailable: UPS-disconnected event.
+- DSM UPS settings changes are settings changes only.
 
 ## Test Plan
 
