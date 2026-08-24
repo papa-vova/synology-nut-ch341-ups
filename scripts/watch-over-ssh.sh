@@ -67,11 +67,17 @@ do
 done
 REMOTE
 
-scp -O "$probe" "$target:/tmp/probe-nas-ups.sh" >/dev/null
+upload_probe() {
+  scp -O \
+    -o ConnectTimeout=8 \
+    -o ServerAliveInterval=5 \
+    -o ServerAliveCountMax=1 \
+    "$probe" "$target:/tmp/probe-nas-ups.sh" >/dev/null
+}
 
 while true; do
   printf '\n=== local=%s ===\n' "$(date +%Y-%m-%dT%H:%M:%S%z)"
-  if ! ssh -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=1 "$target" "sudo /bin/sh /tmp/probe-nas-ups.sh"; then
+  if ! upload_probe || ! ssh -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=1 "$target" "sudo /bin/sh /tmp/probe-nas-ups.sh"; then
     printf 'ssh=DOWN\n'
   fi
   sleep "$interval"

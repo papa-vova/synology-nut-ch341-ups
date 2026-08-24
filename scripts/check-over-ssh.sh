@@ -117,9 +117,9 @@ else
 fi
 
 if [ "$health_rc" -eq 0 ]; then
-  ok "output helper cut timing" "uses UPS offdelay"
+  ok "shutdown manager policy" "Safe/Standby first, output cut or AC-return reboot"
 else
-  bad "output helper cut timing" "not confirmed by healthcheck"
+  bad "shutdown manager policy" "not confirmed by healthcheck"
 fi
 
 wait_time="$(sudo /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_wait_time 2>/dev/null)"

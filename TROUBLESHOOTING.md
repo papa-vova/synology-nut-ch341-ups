@@ -71,23 +71,22 @@ Then check whether the helper attempted the standard NUT shutdown command:
 ```sh
 systemctl status ch341-ups-output-shutdown.service --no-pager
 journalctl -u ch341-ups-output-shutdown.service --since "30 minutes ago" --no-pager
-grep -iE 'upsdrvctl shutdown|shutdown.return|Shutdown failed|output shutdown' /var/log/messages /var/log/systemd/ch341-ups-output-shutdown.service.log
+grep -iE 'raw Megatec|output shutdown|shutdown.return|Shutdown failed' /var/log/messages /var/log/systemd/ch341-ups-output-shutdown.service.log
 ```
 
 Some UPS firmware may ignore the Megatec/Qx shutdown-return command. In that
-case DSM can still enter Safe/Standby Mode, but the UPS output-cut step will be
-best-effort and the helper logs should show the failed command attempt.
+case the helper should stay alive in DSM Safe/Standby and use the AC-return
+reboot fallback instead.
 
-## NAS loses power after mains returns
+## NAS does not recover after mains returns
 
-If the NAS enters Safe/Standby Mode and then loses power a few minutes after AC
-returns, check whether a shutdown-return command had already been sent:
+If the NAS enters Safe/Standby Mode but does not boot after AC returns, check
+whether the output-cut path or the AC-return fallback ran:
 
 ```sh
-grep -iE 'output shutdown|upsdrvctl shutdown|shutdown.return|safe shutdown|watchdog|online|ups.status' /var/log/ups.log /var/log/messages /var/log/systemd/ch341-ups-output-shutdown.service.log
+grep -iE 'raw Megatec|output cut|AC returned|Safe/Standby|safe shutdown|watchdog|online|ups.status' /var/log/ups.log /var/log/messages /var/log/systemd/ch341-ups-output-shutdown.service.log
 ```
 
-The watchdog should request DSM Safe/Standby Mode first. Once DSM Safe/Standby
-Mode has started, the output-shutdown helper should re-check live UPS status and
-ask NUT to cut UPS output. The UPS `offdelay` is the grace window for DSM to
-finish Safe/Standby before output is actually cut.
+The shutdown manager enters DSM Safe/Standby first. From there it tries UPS
+output cut. If the UPS refuses output cut, the helper should remain alive,
+poll the UPS directly, and reboot DSM when AC input returns.

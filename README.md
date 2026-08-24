@@ -9,7 +9,7 @@ The tested device was a Conceptronic UPS exposing USB `1a86:7523` and speaking a
 - DSM's stock USB UPS detection expects USB HID.
 - This UPS is not HID; DSM sees a USB serial bridge, but does not configure it as a UPS.
 - There is no off-the-shelf DSM/NUT setup that handles this end-to-end for this device class.
-- After mains power is cut, DSM should wait for the configured UPS wait time, enter Safe/Standby Mode, ask the UPS to cut output, and later boot normally when UPS output returns.
+- After mains power is cut, DSM should wait for the configured UPS wait time, enter Safe/Standby safely, ask the UPS to cut output if supported, and recover automatically when mains returns.
 - DSM notifications and logs should show whether monitoring is healthy.
 
 ## Solution Architecture
@@ -20,7 +20,8 @@ The setup stays as close as practical to stock DSM:
 - The added `ch341.ko` module is loaded from `/usr/local`, creates `/dev/ttyUSB*` for the CH341 bridge, and leaves UPS monitoring to the stock NUT stack over that serial TTY.
 - A DSM service drop-in points the stock UPS USB service at the serial-aware startup path.
 - A watchdog timer runs the DSM-configured power-loss decision loop shown below.
-- After DSM Safe/Standby Mode starts, a detached output-shutdown helper re-checks live UPS status before asking NUT to cut UPS output; the UPS `offdelay` is the grace window for DSM to finish Safe/Standby.
+- When the wait time expires or low battery is reported, a shutdown manager re-checks live UPS status, asks DSM to enter Safe/Standby, then tries to cut UPS output over the Megatec serial protocol.
+- If this UPS refuses output-cut commands, the shutdown manager remains alive in Safe/Standby, polls the UPS directly, and reboots the NAS when mains returns.
 - A healthcheck timer verifies the installed setup after boot and after DSM updates. It uses DSM's stock Power supply events for user-visible notifications, but it is not part of the power-loss sequence.
 
 ### DSM Runtime
@@ -33,13 +34,14 @@ The setup stays as close as practical to stock DSM:
 #### Watchdog
 
 - The watchdog is a DSM systemd timer, not a separate always-running process.
-- It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby shutdown path shown in the outage sequence.
-- It reads DSM's UPS wait time at runtime. Wait-time expiry and low-battery/FSD events request DSM Safe/Standby Mode and start the output-shutdown helper.
+- It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the shutdown path shown in the outage sequence.
+- It reads DSM's UPS wait time at runtime. Wait-time expiry and low-battery/FSD events start the shutdown manager.
 
 #### Output Shutdown
 
-- After DSM Safe/Standby Mode starts, the output-shutdown helper reads DSM's UPS-output-shutdown setting and re-checks live UPS status.
-- If the setting is enabled and the UPS is still `OB` or `LB`, it asks NUT to perform the configured UPS output shutdown using `offdelay` and `ondelay`; `offdelay` provides the safe-shutdown grace window.
+- The shutdown manager reads DSM's UPS-output-shutdown setting and re-checks live UPS status before entering the output-control path.
+- If the setting is enabled and the UPS is still `OB` or `LB`, it lets DSM enter Safe/Standby first, then sends Megatec output-cut commands from that low-power state.
+- If the UPS refuses output cut, the helper waits in Safe/Standby and reboots DSM after AC input returns.
 - A `safe-shutdown.service` drop-in remains installed as a compatibility path for DSM flows that run Synology's safe-shutdown service directly.
 
 #### Healthcheck
@@ -70,19 +72,26 @@ sequenceDiagram
     D-->>W: exposes OL
     W->>W: clear battery timer
   else timer expires
-    W-->>D: request Safe/Standby Mode
-    W-->>O: start output-shutdown helper
-    D->>D: stop services and protect volumes
+    W-->>O: start shutdown manager
     O->>O: re-check UPS status and output-shutdown setting
     alt still on battery
-      O-->>U: request shutdown-return
-      U->>U: wait offdelay so DSM can finish Safe/Standby, then cut output
-      M-->>U: power returns
-      U->>U: wait ondelay, then restore output
-      U-->>D: supply power
-      D->>D: boot and start UPS services
+      O-->>D: request Safe/Standby
+      D->>D: stop services and unmount volumes
+      O-->>U: request Megatec output cut
+      alt UPS accepts output cut
+        U->>U: cut output after command delay
+        M-->>U: power returns
+        U->>U: wait ondelay, then restore output
+        U-->>D: supply power
+        D->>D: boot and start UPS services
+      else UPS refuses output cut
+        O->>O: poll UPS directly while DSM stays in Safe/Standby
+        M-->>U: power returns
+        U-->>O: reports AC input
+        O-->>D: reboot DSM to restore services
+      end
     else mains already returned
-      O->>O: skip UPS output cut
+      O->>O: skip shutdown
     end
     D-->>W: expose current UPS status
     W->>W: verify monitoring and clear outage state
@@ -125,7 +134,7 @@ Set local parameters:
 export DSM_USER=admin
 export NAS=nas
 export WAIT_SECONDS=900
-export UPS_OFF_DELAY_SECONDS=60
+export UPS_OFF_DELAY_SECONDS=300
 export UPS_ON_DELAY_SECONDS=180
 ```
 
@@ -234,10 +243,10 @@ rules decide which delivery channels receive them.
 - Control Panel -> Hardware & Power -> UPS -> Enable UPS support: enabled.
 - UPS type: `USB UPS`.
 - Time before Synology NAS enters Standby Mode: `Customize time`; the fallback default is 15 minutes only when DSM has no valid saved setting.
-- `Shut down UPS when the system enters Standby Mode`: checked if the UPS should cut output after DSM enters Safe/Standby Mode.
+- `Shut down UPS when the system enters Standby Mode`: checked if the shutdown manager should try to cut UPS output during the shutdown path.
 - `Until low battery`: not recommended for this UPS class because battery/runtime reporting is not reliable enough for the shutdown policy.
 
-The watchdog reads DSM's UPS wait time at runtime. The output-shutdown helper is started when DSM Safe/Standby Mode is requested by wait-time expiry or low battery, waits until DSM Safe/Standby Mode has started, reads the UPS-output-shutdown setting, and re-checks that the UPS is still on battery before asking NUT to cut output. The UPS `offdelay` provides the safe-shutdown grace window after that command is accepted. Changing those two UI settings does not require reinstalling.
+The watchdog reads DSM's UPS wait time at runtime. When the wait time expires, low battery is reported, or FSD is received, the shutdown manager reads the UPS-output-shutdown setting, re-checks that the UPS is still on battery, enters DSM Safe/Standby, and then tries the UPS output-cut path. If output cut is rejected, the helper waits in Safe/Standby for AC return and reboots DSM. Changing those two UI settings does not require reinstalling.
 
 ### Build And Install
 
@@ -267,7 +276,7 @@ make install
 - Mains input loss: battery-mode event.
 - Mains input restored: AC-return event.
 - Low battery: low-battery event when the UPS/NUT reports low battery.
-- DSM wait-time expiry enters Safe/Standby Mode; it is not treated as a low-battery notification.
+- DSM wait-time expiry starts the shutdown path; it is not treated as a low-battery notification.
 - UPS disconnected/unavailable: UPS-disconnected event.
 - DSM UPS settings changes are settings changes only; when monitoring is already healthy, they preserve the already-running UPS monitor instead of restarting it.
 - Power-state events use the single DSM-facing path: `upsmon EXEC -> upssched -> wrapper -> synoups -> DSM stock UPS event`.
@@ -321,12 +330,13 @@ Expected:
 2. Run `make check`.
 3. Cut mains input to the UPS.
 4. Wait longer than the configured DSM UPS wait time, or until the UPS reports low battery.
-5. DSM enters Safe/Standby Mode.
-6. If UPS status is still `OB` or `LB`, the output-shutdown helper asks NUT to cut UPS output; the UPS cuts output after the configured off-delay.
-7. Restore mains input to the UPS.
-8. UPS output returns after the configured on-delay.
-9. NAS boots.
-10. DSM sends the UPS-connected notification after the UPS stack starts (if configured).
-11. Run `make check` again.
+5. The shutdown manager asks the UPS to cut output if DSM output shutdown is enabled and the UPS is still `OB` or `LB`.
+6. DSM enters Safe/Standby: services stop and volumes are unmounted.
+7. If the UPS accepts output cut, output drops and later returns after mains returns.
+8. If the UPS refuses output cut, the helper waits in Safe/Standby for AC input to return.
+9. Restore mains input to the UPS.
+10. Expected: the NAS boots normally after UPS output returns, or reboots from Safe/Standby when the helper detects AC return.
+11. DSM sends the UPS-connected notification after the UPS stack starts (if configured).
+12. Run `make check` again.
 
 If the check reports a problem, use [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
