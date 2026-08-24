@@ -39,9 +39,9 @@ The setup stays as close as practical to stock DSM:
 
 #### Output Shutdown
 
-- The shutdown manager reads DSM's UPS-output-shutdown setting and re-checks live UPS status before entering the output-control path.
+- The shutdown manager reads DSM's UPS-output-shutdown setting to decide whether to try cutting UPS output, and re-checks live UPS status before entering Safe/Standby recovery.
 - If DSM UPS output shutdown is enabled and the UPS is still on battery, the shutdown manager waits for DSM Safe/Standby and then attempts UPS output shutdown from that safe state.
-- If the UPS refuses output cut, the helper waits in Safe/Standby and reboots DSM after AC input returns.
+- If output cut is disabled or the UPS refuses it, the helper waits in Safe/Standby and reboots DSM after AC input returns.
 - A compatibility hook covers DSM safe-shutdown flows that bypass the watchdog, so they still use the same serial-UPS recovery path.
 
 #### Notifications
@@ -241,7 +241,7 @@ rules decide which delivery channels receive them.
 - Control Panel -> Hardware & Power -> UPS -> Enable UPS support: enabled.
 - UPS type: `USB UPS`.
 - Time before Synology NAS enters Standby Mode: `Customize time`; this DSM setting is the shutdown wait time used at runtime. `WAIT_SECONDS` only supplies the initial fallback when DSM has no valid saved wait time.
-- `Shut down UPS when the system enters Standby Mode`: checked if the shutdown manager should try to cut UPS output during the shutdown path.
+- `Shut down UPS when the system enters Standby Mode`: checked if the shutdown manager should try to cut UPS output during the shutdown path. AC-return recovery still runs after Safe/Standby if this is unchecked.
 - `Until low battery`: not recommended for this UPS class because battery/runtime reporting is not reliable enough for the shutdown policy.
 
 Choose the DSM wait time so real battery capacity leaves reserve for Safe/Standby and recovery. Changing the wait time or UPS-output-shutdown setting in DSM does not require reinstalling.

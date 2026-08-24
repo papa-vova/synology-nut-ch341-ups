@@ -974,11 +974,6 @@ if ! is_on_battery; then
 	exit 0
 fi
 
-if ! ups_output_shutdown_enabled; then
-	log "DSM UPS output shutdown is disabled; output-shutdown helper exiting"
-	exit 0
-fi
-
 waited=0
 while ! safe_mode_started; do
 	if [ "\$waited" -ge "\$SAFE_MODE_DETECT_TIMEOUT_SECONDS" ]; then
@@ -989,10 +984,16 @@ while ! safe_mode_started; do
 	waited=\$((waited + SAFE_MODE_POLL_SECONDS))
 done
 
-log "DSM Safe/Standby detected; trying raw Megatec return commands to cut UPS output"
+log "DSM Safe/Standby detected; preparing serial UPS recovery path"
 /usr/syno/bin/syno_scemd_connector --signal 70 >/dev/null 2>&1 || true
 stop_ups_daemons
 
+if ! ups_output_shutdown_enabled; then
+	log "DSM UPS output shutdown is disabled; waiting for AC return without cutting UPS output"
+	wait_for_ac_return_and_reboot
+fi
+
+log "Trying raw Megatec return commands to cut UPS output"
 if request_raw_megatec_output_cut; then
 	exit 0
 fi
@@ -1293,16 +1294,15 @@ fi
 /usr/syno/bin/scemd &
 sleep 2
 
-if ! ups_output_shutdown_enabled; then
-	log "DSM UPS output shutdown is disabled; skipping UPS output shutdown command"
-	exit 0
-fi
-
 if ! is_on_battery; then
 	exit 0
 fi
 
-log "Starting raw UPS output-cut helper from Safe/Standby"
+if ups_output_shutdown_enabled; then
+	log "Starting raw UPS output-cut helper from Safe/Standby"
+else
+	log "Starting AC-return recovery helper from Safe/Standby"
+fi
 start_output_shutdown_helper
 EOF
 	chown root:root "$SAFE_SHUTDOWN_SCRIPT" || true
@@ -1413,7 +1413,7 @@ NAS kernel: $(uname -a)
 - The watchdog is a DSM systemd timer, not a separate always-running process.
 - It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby recovery path. If UPS status is unreadable before Safe/Standby starts, it force-restarts the UPS stack once and rechecks status before giving up.
 - It reads DSM's UPS wait time from Control Panel settings at runtime. Wait-time expiry and low-battery/FSD events start the shutdown manager.
-- If DSM has no valid \`ups_safeshutdown\` value, the startup path initializes it to \`$SHUTDOWN_UPS\`. The shutdown manager reads that setting at runtime, re-checks live UPS status, lets DSM enter Safe/Standby, and then tries the Megatec output-cut path if the UPS is still \`OB\` or \`LB\`. If the UPS refuses output cut, the helper waits in Safe/Standby, polls the UPS directly, and reboots DSM when AC input returns.
+- If DSM has no valid \`ups_safeshutdown\` value, the startup path initializes it to \`$SHUTDOWN_UPS\`. The shutdown manager reads that setting at runtime to decide whether to try cutting UPS output, re-checks live UPS status, and lets DSM enter Safe/Standby. If output cut is disabled or refused, the helper waits in Safe/Standby, polls the UPS directly, and reboots DSM when AC input returns.
 - A compatibility hook covers DSM safe-shutdown flows that bypass the watchdog, so they still use the same serial-UPS recovery path.
 - The NUT driver is configured with \`offdelay = $UPS_OFF_DELAY_SECONDS\` and \`ondelay = $UPS_ON_DELAY_SECONDS\`, but recovery does not depend on those values alone. If the UPS refuses output-cut commands, the Safe/Standby helper waits for AC input to return and reboots DSM from that safe state.
 - The UPS does not report battery charge/runtime/model fields directly. The config supplies NUT fallback values so DSM can display a normal USB UPS. Battery charge/runtime are estimates; shutdown uses DSM's configured fixed wait time, not the displayed runtime estimate.
@@ -1431,7 +1431,7 @@ NAS kernel: $(uname -a)
   - UPS support should be enabled.
   - UPS type should show USB UPS.
   - Time before entering Standby/Safe Mode is the shutdown wait time used at runtime. \`$WAIT_SECONDS\` seconds only supplies the initial fallback when DSM has no valid saved wait time.
-  - "Shut down UPS when the system enters Standby Mode" should be checked if the shutdown manager should try to cut UPS output during the shutdown path.
+  - "Shut down UPS when the system enters Standby Mode" should be checked if the shutdown manager should try to cut UPS output during the shutdown path. AC-return recovery still runs after Safe/Standby if this is unchecked.
 - UPS wait time and UPS-output-shutdown changes made in Control Panel are preserved across UPS service restarts and are read at runtime.
 
 ## Useful Commands
