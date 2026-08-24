@@ -808,6 +808,8 @@ SYNOUPS_CONF="$SYNOUPS_CONF"
 STACK_SCRIPT="$STACK_SCRIPT"
 SAFE_DOWN_MARKER="/tmp/ups.safedown"
 SAFE_TARGET_GRACE_SECONDS=300
+SAFE_TARGET_STATUS_TIMEOUT_SECONDS=3
+SAFE_TARGET_POLL_SECONDS=5
 SHUTDOWN_RETRIES=3
 RETRY_SLEEP_SECONDS=40
 LOG_TAG="ch341-ups"
@@ -824,8 +826,12 @@ ups_output_shutdown_enabled() {
 safe_mode_started() {
 	[ -e "\$SAFE_DOWN_MARKER" ] && return 0
 	/usr/syno/bin/synobootseq --is-safe-shutdown >/dev/null 2>&1 && return 0
-	status="\$(synosystemctl get-active-status safe-shutdown.target 2>/dev/null || true)"
+	status="\$(safe_shutdown_target_status)"
 	[ "\$status" = "active" ]
+}
+
+safe_shutdown_target_status() {
+	/usr/bin/timeout "\$SAFE_TARGET_STATUS_TIMEOUT_SECONDS" synosystemctl get-active-status safe-shutdown.target 2>/dev/null || true
 }
 
 current_ups_status() {
@@ -864,15 +870,14 @@ restart_monitoring_after_failure() {
 }
 
 wait_for_safe_shutdown_target_or_grace() {
-	waited=0
-	while [ "\$waited" -lt "\$SAFE_TARGET_GRACE_SECONDS" ]; do
-		status="\$(synosystemctl get-active-status safe-shutdown.target 2>/dev/null || true)"
+	deadline=\$((\$(date +%s) + SAFE_TARGET_GRACE_SECONDS))
+	while [ "\$(date +%s)" -lt "\$deadline" ]; do
+		status="\$(safe_shutdown_target_status)"
 		if [ "\$status" = "active" ]; then
 			log "DSM safe-shutdown target is active; UPS output shutdown window is open"
 			return 0
 		fi
-		sleep 5
-		waited=\$((waited + 5))
+		sleep "\$SAFE_TARGET_POLL_SECONDS"
 	done
 	log "DSM safe-shutdown target did not become active within \${SAFE_TARGET_GRACE_SECONDS}s; proceeding because DSM Safe/Standby Mode has already started"
 	return 0
@@ -1208,6 +1213,8 @@ check_once() {
 	grep -Fq "\$OUTPUT_SHUTDOWN_SERVICE_NAME" "\$WATCHDOG_SCRIPT" 2>/dev/null || append_issue "\$WATCHDOG_SCRIPT is not wired to start \$OUTPUT_SHUTDOWN_SERVICE_NAME"
 	grep -Fq "\$OUTPUT_SHUTDOWN_SERVICE_NAME" "\$UPSSCHED_CMD_SCRIPT" 2>/dev/null || append_issue "\$UPSSCHED_CMD_SCRIPT is not wired to start \$OUTPUT_SHUTDOWN_SERVICE_NAME"
 	grep -Fq "/usr/bin/upsdrvctl shutdown" "\$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null || append_issue "\$OUTPUT_SHUTDOWN_SCRIPT is missing NUT output-shutdown command"
+	grep -Fq "safe_shutdown_target_status()" "\$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null || append_issue "\$OUTPUT_SHUTDOWN_SCRIPT is missing timed DSM safe-target status helper"
+	grep -Fq '/usr/bin/timeout "\$SAFE_TARGET_STATUS_TIMEOUT_SECONDS" synosystemctl' "\$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null || append_issue "\$OUTPUT_SHUTDOWN_SCRIPT can block forever while reading DSM safe-target status"
 	systemctl cat safe-shutdown.service 2>/dev/null | grep -Fq "ExecStart=\$SAFE_SHUTDOWN_SCRIPT" || append_issue "safe-shutdown.service is not using \$SAFE_SHUTDOWN_SCRIPT"
 	grep -Fq "NOTIFYCMD /usr/sbin/upssched" "\$UPSMON_CONF" 2>/dev/null || append_issue "upsmon is not configured to invoke upssched"
 	grep -Fq "NOTIFYFLAG ONBATT EXEC" "\$UPSMON_CONF" 2>/dev/null || append_issue "upsmon ONBATT notification does not execute commands"

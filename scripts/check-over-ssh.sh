@@ -116,6 +116,12 @@ else
   bad "ch341-ups-output-shutdown.service" "missing or not wired"
 fi
 
+if [ "$health_rc" -eq 0 ]; then
+  ok "output helper target wait" "timed"
+else
+  bad "output helper target wait" "not confirmed by healthcheck"
+fi
+
 wait_time="$(sudo /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_wait_time 2>/dev/null)"
 if [ -n "$wait_time" ]; then
   ok "DSM UPS wait time" "${wait_time}s"
