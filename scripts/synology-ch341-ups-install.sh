@@ -807,9 +807,9 @@ UPS_NAME="$UPS_NAME"
 SYNOUPS_CONF="$SYNOUPS_CONF"
 STACK_SCRIPT="$STACK_SCRIPT"
 SAFE_DOWN_MARKER="/tmp/ups.safedown"
-SAFE_TARGET_GRACE_SECONDS=300
 SAFE_TARGET_STATUS_TIMEOUT_SECONDS=3
-SAFE_TARGET_POLL_SECONDS=5
+SAFE_MODE_POLL_SECONDS=5
+SAFE_MODE_DETECT_TIMEOUT_SECONDS=180
 SHUTDOWN_RETRIES=3
 RETRY_SLEEP_SECONDS=40
 LOG_TAG="ch341-ups"
@@ -869,20 +869,6 @@ restart_monitoring_after_failure() {
 	"\$STACK_SCRIPT" start >/dev/null 2>&1 || log "Could not restart UPS monitoring after output shutdown failure"
 }
 
-wait_for_safe_shutdown_target_or_grace() {
-	deadline=\$((\$(date +%s) + SAFE_TARGET_GRACE_SECONDS))
-	while [ "\$(date +%s)" -lt "\$deadline" ]; do
-		status="\$(safe_shutdown_target_status)"
-		if [ "\$status" = "active" ]; then
-			log "DSM safe-shutdown target is active; UPS output shutdown window is open"
-			return 0
-		fi
-		sleep "\$SAFE_TARGET_POLL_SECONDS"
-	done
-	log "DSM safe-shutdown target did not become active within \${SAFE_TARGET_GRACE_SECONDS}s; proceeding because DSM Safe/Standby Mode has already started"
-	return 0
-}
-
 if ! ups_output_shutdown_enabled; then
 	log "DSM UPS output shutdown is disabled; output-shutdown helper exiting"
 	exit 0
@@ -890,16 +876,15 @@ fi
 
 waited=0
 while ! safe_mode_started; do
-	if [ "\$waited" -ge 180 ]; then
+	if [ "\$waited" -ge "\$SAFE_MODE_DETECT_TIMEOUT_SECONDS" ]; then
 		log "DSM Safe/Standby Mode was not detected; refusing to cut UPS output"
 		exit 1
 	fi
-	sleep 5
-	waited=\$((waited + 5))
+	sleep "\$SAFE_MODE_POLL_SECONDS"
+	waited=\$((waited + SAFE_MODE_POLL_SECONDS))
 done
 
-log "DSM Safe/Standby Mode detected; waiting up to 300s for DSM safe-shutdown target"
-wait_for_safe_shutdown_target_or_grace
+log "DSM Safe/Standby Mode detected; requesting UPS output shutdown now; configured UPS offdelay provides the safe-shutdown grace window"
 
 if ! is_on_battery; then
 	exit 0
@@ -1214,7 +1199,8 @@ check_once() {
 	grep -Fq "\$OUTPUT_SHUTDOWN_SERVICE_NAME" "\$UPSSCHED_CMD_SCRIPT" 2>/dev/null || append_issue "\$UPSSCHED_CMD_SCRIPT is not wired to start \$OUTPUT_SHUTDOWN_SERVICE_NAME"
 	grep -Fq "/usr/bin/upsdrvctl shutdown" "\$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null || append_issue "\$OUTPUT_SHUTDOWN_SCRIPT is missing NUT output-shutdown command"
 	grep -Fq "safe_shutdown_target_status()" "\$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null || append_issue "\$OUTPUT_SHUTDOWN_SCRIPT is missing timed DSM safe-target status helper"
-	grep -Fq '/usr/bin/timeout "\$SAFE_TARGET_STATUS_TIMEOUT_SECONDS" synosystemctl' "\$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null || append_issue "\$OUTPUT_SHUTDOWN_SCRIPT can block forever while reading DSM safe-target status"
+	grep -Fq '/usr/bin/timeout "\$SAFE_TARGET_STATUS_TIMEOUT_SECONDS" synosystemctl' "\$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null || append_issue "\$OUTPUT_SHUTDOWN_SCRIPT can block while reading DSM safe-target status"
+	grep -Fq "configured UPS offdelay provides the safe-shutdown grace window" "\$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null || append_issue "\$OUTPUT_SHUTDOWN_SCRIPT waits in DSM Safe/Standby instead of using UPS offdelay for the grace window"
 	systemctl cat safe-shutdown.service 2>/dev/null | grep -Fq "ExecStart=\$SAFE_SHUTDOWN_SCRIPT" || append_issue "safe-shutdown.service is not using \$SAFE_SHUTDOWN_SCRIPT"
 	grep -Fq "NOTIFYCMD /usr/sbin/upssched" "\$UPSMON_CONF" 2>/dev/null || append_issue "upsmon is not configured to invoke upssched"
 	grep -Fq "NOTIFYFLAG ONBATT EXEC" "\$UPSMON_CONF" 2>/dev/null || append_issue "upsmon ONBATT notification does not execute commands"
@@ -1506,7 +1492,7 @@ NAS kernel: $(uname -a)
 - The watchdog is a DSM systemd timer, not a separate always-running process.
 - It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby shutdown path.
 - It reads DSM's UPS wait time at runtime. Wait-time expiry and low-battery/FSD events request DSM Safe/Standby Mode and start the output-shutdown helper.
-- If DSM has no valid \`ups_safeshutdown\` value, the startup path initializes it to \`$SHUTDOWN_UPS\`. The output-shutdown helper reads that setting at runtime, waits up to 5 minutes for DSM's UPS safe-shutdown target, re-checks live UPS status, and only asks NUT to cut output if the UPS is still \`OB\` or \`LB\`.
+- If DSM has no valid \`ups_safeshutdown\` value, the startup path initializes it to \`$SHUTDOWN_UPS\`. The output-shutdown helper reads that setting at runtime, waits until DSM Safe/Standby Mode has started, re-checks live UPS status, and asks NUT to cut output only if the UPS is still \`OB\` or \`LB\`. The UPS \`offdelay\` is the grace window that lets DSM finish Safe/Standby after the command is accepted.
 - \`safe-shutdown.service\` has a drop-in that runs \`$SAFE_SHUTDOWN_SCRIPT\` instead of Synology's original safe-shutdown script. This compatibility path preserves Synology's \`synoups shutdownups\` behavior for DSM flows that run the safe-shutdown service directly.
 - The NUT driver is configured with \`offdelay = $UPS_OFF_DELAY_SECONDS\` and \`ondelay = $UPS_ON_DELAY_SECONDS\`. Because \`stayoff\` is not set, \`nutdrv_qx\` uses its normal return behavior: shut the load off, then turn it back on after mains power has returned. The exact behavior must be verified with a controlled outage test, because some low-cost UPS firmware ignores parts of the command.
 - The UPS does not report battery charge/runtime/model fields directly. The config supplies NUT fallback values so DSM can display a normal USB UPS. Battery charge/runtime are estimates; shutdown uses DSM's configured fixed wait time, not the displayed runtime estimate.
@@ -1577,7 +1563,7 @@ systemctl status ch341-ups-watchdog.service --no-pager
    Only run this when it is acceptable for DSM to stop services. Unplug the UPS input from wall power and wait longer than the configured DSM UPS wait time, or until the UPS reports low battery. Expected: DSM Safe/Standby Mode is requested and the output-shutdown helper starts. After DSM Safe/Standby Mode starts, if the UPS is still \`OB\` or \`LB\`, the helper asks NUT to cut UPS output after \`$UPS_OFF_DELAY_SECONDS\` seconds. Restore wall power. The UPS should turn output back on, and the NAS should start because automatic restart after power failure is enabled in Hardware & Power -> General.
 
 6. Shortened full-flow test:
-   For a faster controlled test, temporarily set the DSM UPS wait time to 1 minute in Control Panel, unplug the UPS input, and wait for Safe/Standby Mode plus UPS output shutoff. With the default \`offdelay\`, output cut can take about 1 minute after the helper asks NUT to shut the UPS output down. Restore wall power and confirm the NAS starts. After the test, restore the normal wait time in DSM.
+   For a faster controlled test, temporarily set the DSM UPS wait time to 1 minute in Control Panel, unplug the UPS input, and wait for Safe/Standby Mode plus UPS output shutoff. With the default \`offdelay\`, output cut can take about 5 minutes after the helper asks NUT to shut the UPS output down. Restore wall power and confirm the NAS starts. After the test, restore the normal wait time in DSM.
 
 7. DSM update test:
    After any DSM update, run \`$STACK_SCRIPT status\` and \`$HEALTH_SCRIPT\`. If the kernel version changed and \`ch341.ko\` no longer matches, the healthcheck should notify administrators and the module must be rebuilt for the new kernel.

@@ -20,7 +20,7 @@ The setup stays as close as practical to stock DSM:
 - The added `ch341.ko` module is loaded from `/usr/local`, creates `/dev/ttyUSB*` for the CH341 bridge, and leaves UPS monitoring to the stock NUT stack over that serial TTY.
 - A DSM service drop-in points the stock UPS USB service at the serial-aware startup path.
 - A watchdog timer runs the DSM-configured power-loss decision loop shown below.
-- After DSM Safe/Standby Mode starts, a detached output-shutdown helper re-checks live UPS status before asking NUT to cut UPS output.
+- After DSM Safe/Standby Mode starts, a detached output-shutdown helper re-checks live UPS status before asking NUT to cut UPS output; the UPS `offdelay` is the grace window for DSM to finish Safe/Standby.
 - A healthcheck timer verifies the installed setup after boot and after DSM updates. It uses DSM's stock Power supply events for user-visible notifications, but it is not part of the power-loss sequence.
 
 ### DSM Runtime
@@ -38,8 +38,8 @@ The setup stays as close as practical to stock DSM:
 
 #### Output Shutdown
 
-- After DSM Safe/Standby Mode starts, the output-shutdown helper waits up to 5 minutes for DSM's UPS safe-shutdown target, then reads DSM's UPS-output-shutdown setting and re-checks live UPS status.
-- If the setting is enabled and the UPS is still `OB` or `LB`, it asks NUT to perform the configured UPS output shutdown using `offdelay` and `ondelay`.
+- After DSM Safe/Standby Mode starts, the output-shutdown helper reads DSM's UPS-output-shutdown setting and re-checks live UPS status.
+- If the setting is enabled and the UPS is still `OB` or `LB`, it asks NUT to perform the configured UPS output shutdown using `offdelay` and `ondelay`; `offdelay` provides the safe-shutdown grace window.
 - A `safe-shutdown.service` drop-in remains installed as a compatibility path for DSM flows that run Synology's safe-shutdown service directly.
 
 #### Healthcheck
@@ -73,10 +73,10 @@ sequenceDiagram
     W-->>D: request Safe/Standby Mode
     W-->>O: start output-shutdown helper
     D->>D: stop services and protect volumes
-    O->>O: wait up to 5 minutes for safe target, then re-check UPS status
+    O->>O: re-check UPS status and output-shutdown setting
     alt still on battery
       O-->>U: request shutdown-return
-      U->>U: wait offdelay, then cut output
+      U->>U: wait offdelay so DSM can finish Safe/Standby, then cut output
       M-->>U: power returns
       U->>U: wait ondelay, then restore output
       U-->>D: supply power
@@ -237,7 +237,7 @@ rules decide which delivery channels receive them.
 - `Shut down UPS when the system enters Standby Mode`: checked if the UPS should cut output after DSM enters Safe/Standby Mode.
 - `Until low battery`: not recommended for this UPS class because battery/runtime reporting is not reliable enough for the shutdown policy.
 
-The watchdog reads DSM's UPS wait time at runtime. The output-shutdown helper is started when DSM Safe/Standby Mode is requested by wait-time expiry or low battery, waits up to 5 minutes for DSM's UPS safe-shutdown target, reads the UPS-output-shutdown setting, and re-checks that the UPS is still on battery before asking NUT to cut output. Changing those two UI settings does not require reinstalling.
+The watchdog reads DSM's UPS wait time at runtime. The output-shutdown helper is started when DSM Safe/Standby Mode is requested by wait-time expiry or low battery, waits until DSM Safe/Standby Mode has started, reads the UPS-output-shutdown setting, and re-checks that the UPS is still on battery before asking NUT to cut output. The UPS `offdelay` provides the safe-shutdown grace window after that command is accepted. Changing those two UI settings does not require reinstalling.
 
 ### Build And Install
 
@@ -322,7 +322,7 @@ Expected:
 3. Cut mains input to the UPS.
 4. Wait longer than the configured DSM UPS wait time, or until the UPS reports low battery.
 5. DSM enters Safe/Standby Mode.
-6. If UPS status is still `OB` or `LB`, the output-shutdown helper asks NUT to cut UPS output after the configured off-delay.
+6. If UPS status is still `OB` or `LB`, the output-shutdown helper asks NUT to cut UPS output; the UPS cuts output after the configured off-delay.
 7. Restore mains input to the UPS.
 8. UPS output returns after the configured on-delay.
 9. NAS boots.

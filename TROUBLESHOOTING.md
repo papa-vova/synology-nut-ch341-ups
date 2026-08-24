@@ -87,6 +87,7 @@ returns, check whether a shutdown-return command had already been sent:
 grep -iE 'output shutdown|upsdrvctl shutdown|shutdown.return|safe shutdown|watchdog|online|ups.status' /var/log/ups.log /var/log/messages /var/log/systemd/ch341-ups-output-shutdown.service.log
 ```
 
-The watchdog should request DSM Safe/Standby Mode first. The output-shutdown
-helper should ask NUT to cut UPS output only after DSM's UPS safe-shutdown
-target is active and live UPS status is still `OB` or `LB`.
+The watchdog should request DSM Safe/Standby Mode first. Once DSM Safe/Standby
+Mode has started, the output-shutdown helper should re-check live UPS status and
+ask NUT to cut UPS output. The UPS `offdelay` is the grace window for DSM to
+finish Safe/Standby before output is actually cut.
