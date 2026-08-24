@@ -139,8 +139,8 @@ export UPS_ON_DELAY_SECONDS=180
 - `NAS` is only the NAS hostname or SSH host alias used by `install`, `check`,
   and `probe`.
 - `DSM_USER` is the DSM account used for SSH login and sudo authorization.
-- `WAIT_SECONDS` is the default DSM UPS wait time used only if DSM has no valid saved setting. Later UI changes are respected.
-- `UPS_OFF_DELAY_SECONDS` and `UPS_ON_DELAY_SECONDS` configure NUT output cutoff/restore delay values for UPS firmware that honors NUT shutdown-return commands. This tested UPS refused those commands, so recovery also has the Safe/Standby AC-return reboot fallback described below.
+- `WAIT_SECONDS` is only the installer fallback for DSM's UPS wait time when DSM has no valid saved setting.
+- `UPS_OFF_DELAY_SECONDS` and `UPS_ON_DELAY_SECONDS` configure NUT output cutoff/restore delay values for UPS firmware that honors NUT shutdown-return commands.
 
 #### Passwordless Access Configuration (Mandatory)
 
@@ -240,11 +240,11 @@ rules decide which delivery channels receive them.
 
 - Control Panel -> Hardware & Power -> UPS -> Enable UPS support: enabled.
 - UPS type: `USB UPS`.
-- Time before Synology NAS enters Standby Mode: `Customize time`; this DSM setting is the shutdown wait time used at runtime.
+- Time before Synology NAS enters Standby Mode: `Customize time`; this DSM setting is the shutdown wait time used at runtime. `WAIT_SECONDS` only supplies the initial fallback when DSM has no valid saved wait time.
 - `Shut down UPS when the system enters Standby Mode`: checked if the shutdown manager should try to cut UPS output during the shutdown path.
 - `Until low battery`: not recommended for this UPS class because battery/runtime reporting is not reliable enough for the shutdown policy.
 
-The watchdog reads DSM's UPS wait time from the UPS settings at runtime. `WAIT_SECONDS` is only the installer fallback, defaulting to 15 minutes, used when DSM has no valid saved wait time. Choose the DSM wait time so real battery capacity leaves reserve for Safe/Standby and recovery. When the wait time expires, low battery is reported, or FSD is received, the shutdown manager reads the UPS-output-shutdown setting, re-checks that the UPS is still on battery, enters DSM Safe/Standby, and then tries the UPS output-cut path. If output cut is rejected, the helper waits in Safe/Standby for AC return and reboots DSM. Changing those two UI settings does not require reinstalling.
+Choose the DSM wait time so real battery capacity leaves reserve for Safe/Standby and recovery. Changing the wait time or UPS-output-shutdown setting in DSM does not require reinstalling.
 
 ### Build And Install
 

@@ -1408,7 +1408,7 @@ NAS kernel: $(uname -a)
 - \`$STACK_SCRIPT\` loads \`ch341.ko\`, finds the CH341-backed \`/dev/ttyUSB*\`, writes the DSM NUT config for \`nutdrv_qx\`, and starts the stock NUT daemons directly.
 - Synology's original \`ups-usb.sh start\` wrapper is intentionally bypassed for startup because it rewrites \`port\` to \`auto\`, which breaks this serial UPS.
 - The udev rule restarts \`ups-usb.service\` if the UPS serial TTY is replugged.
-- If DSM has no valid UPS wait time, the startup path initializes it to \`$WAIT_SECONDS\` seconds; otherwise DSM UI changes are preserved.
+- DSM UPS wait time is read from Control Panel at runtime; \`$WAIT_SECONDS\` seconds is only the fallback used when DSM has no valid saved value.
 - \`upssched\` uses \`$UPSSCHED_CMD_SCRIPT\` as its command script for battery-mode and mains-restored notifications.
 - The watchdog is a DSM systemd timer, not a separate always-running process.
 - It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby recovery path. If UPS status is unreadable before Safe/Standby starts, it force-restarts the UPS stack once and rechecks status before giving up.
@@ -1430,7 +1430,7 @@ NAS kernel: $(uname -a)
 - Control Panel -> Hardware & Power -> UPS:
   - UPS support should be enabled.
   - UPS type should show USB UPS.
-  - Time before entering Standby/Safe Mode is the shutdown wait time used at runtime. The installer fallback, \`$WAIT_SECONDS\` seconds for this install, is used only when DSM has no valid saved wait time.
+  - Time before entering Standby/Safe Mode is the shutdown wait time used at runtime. \`$WAIT_SECONDS\` seconds only supplies the initial fallback when DSM has no valid saved wait time.
   - "Shut down UPS when the system enters Standby Mode" should be checked if the shutdown manager should try to cut UPS output during the shutdown path.
 - UPS wait time and UPS-output-shutdown changes made in Control Panel are preserved across UPS service restarts and are read at runtime.
 
