@@ -13,7 +13,7 @@ If `make check` reports `FAIL`, collect NAS-side details:
 ```sh
 make check NAS="$NAS" DSM_USER="$DSM_USER"
 ssh "$SSH_TARGET" "sudo /usr/local/sbin/ch341-ups.sh status"
-ssh "$SSH_TARGET" "sudo journalctl -u ch341-ups-watchdog.service -u ch341-ups-output-shutdown.service -u ups-usb.service --since '30 minutes ago' --no-pager"
+ssh "$SSH_TARGET" "sudo journalctl -u ch341-ups-watchdog.service -u ch341-ups-output-shutdown.service -u ch341-ups.service -u ups-usb.service --since '30 minutes ago' --no-pager"
 ```
 
 ## DSM shows no USB UPS
@@ -49,6 +49,22 @@ Run on the NAS while the UPS is on battery:
 
 If status remains `OL`, the UPS firmware or selected protocol is not reporting battery mode correctly.
 
+## UPS status is unreadable
+
+The watchdog should force-restart the UPS stack once when `ups.status` is
+unreadable before Safe/Standby starts. Check whether it recovered status:
+
+```sh
+journalctl -u ch341-ups-watchdog.service -u ch341-ups.service -u ups-usb.service --since "30 minutes ago" --no-pager
+/usr/bin/upsc ups@localhost ups.status
+systemctl status ch341-ups.service ups-usb.service --no-pager
+```
+
+Look for watchdog messages about force-restarting the UPS stack and either
+recovering readable status or emitting the UPS-disconnected event. If status is
+still unreadable after the forced restart, check the module and TTY sections
+above, then reinstall after rebuilding the module if the DSM kernel changed.
+
 ## DSM does not shut down after the timer
 
 Check the watchdog:
@@ -58,6 +74,10 @@ systemctl is-active ch341-ups-watchdog.timer
 systemctl status ch341-ups-watchdog.service --no-pager
 journalctl -u ch341-ups-watchdog.service --since "30 minutes ago" --no-pager
 ```
+
+If the log says UPS status was unreadable, follow the `UPS status is unreadable`
+section first. The watchdog cannot safely count battery time or request
+Safe/Standby without a readable `OL`, `OB`, or `LB` state.
 
 ## UPS does not cut output
 
