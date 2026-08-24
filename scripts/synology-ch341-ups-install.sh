@@ -1691,7 +1691,9 @@ check_install() {
 	fi
 
 	if grep -Fq "DSM Safe/Standby detected" "$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null &&
-		grep -Fq "AC-return Safe/Standby reboot path" "$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null; then
+		grep -Fq "AC-return Safe/Standby reboot path" "$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null &&
+		grep -Fq "waiting for AC return without cutting UPS output" "$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null &&
+		grep -Fq "Starting AC-return recovery helper from Safe/Standby" "$SAFE_SHUTDOWN_SCRIPT" 2>/dev/null; then
 		check_ok "shutdown manager policy" "Safe/Standby first, output cut or AC-return reboot"
 	else
 		check_bad "shutdown manager policy" "not wired"
