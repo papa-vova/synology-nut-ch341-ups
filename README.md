@@ -19,10 +19,9 @@ The setup stays as close as practical to stock DSM:
 - DSM's own `nutdrv_qx`, `upsd`, `upsmon`, `upssched`, and `synoups` are used.
 - The added `ch341.ko` module is loaded from `/usr/local`, creates `/dev/ttyUSB*` for the CH341 bridge, and leaves UPS monitoring to the stock NUT stack over that serial TTY.
 - A DSM service drop-in points the stock UPS USB service at the serial-aware startup path.
-- A watchdog timer runs the DSM-configured power-loss decision loop shown below.
+- A watchdog timer runs the DSM-configured power-loss decision loop shown below and repairs the UPS status read path if it becomes unreadable before Safe/Standby starts.
 - When the wait time expires or low battery is reported, a shutdown manager re-checks live UPS status, asks DSM to enter Safe/Standby, then tries to cut UPS output over the Megatec serial protocol.
 - If this UPS refuses output-cut commands, the shutdown manager remains alive in Safe/Standby, polls the UPS directly, and reboots the NAS when mains returns.
-- A healthcheck timer verifies the installed setup after boot and after DSM updates. It uses DSM's stock Power supply events for user-visible notifications, but it is not part of the power-loss sequence.
 
 ### DSM Runtime
 
@@ -35,6 +34,7 @@ The setup stays as close as practical to stock DSM:
 
 - The watchdog is a DSM systemd timer, not a separate always-running process.
 - It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the shutdown path shown in the outage sequence.
+- If UPS status is unreadable before Safe/Standby starts, it force-restarts the UPS stack once and rechecks status before giving up.
 - It reads DSM's UPS wait time at runtime. Wait-time expiry and low-battery/FSD events start the shutdown manager.
 
 #### Output Shutdown
@@ -44,12 +44,10 @@ The setup stays as close as practical to stock DSM:
 - If the UPS refuses output cut, the helper waits in Safe/Standby and reboots DSM after AC input returns.
 - A compatibility hook covers DSM safe-shutdown flows that bypass the watchdog, so they still use the same serial-UPS recovery path.
 
-#### Healthcheck
+#### Notifications
 
-- The healthcheck is also a DSM systemd timer, not a separate always-running process.
-- The healthcheck runs after boot and periodically on its own installed timer, 15 minutes by default. It reads DSM UPS settings during each run, but DSM Control Panel does not configure the healthcheck cadence.
 - UPS monitoring connect/recovery emits DSM's stock `The UPS has been connected` event.
-- If monitoring is still unavailable after an automatic restart attempt, the healthcheck emits DSM's stock `The UPS has been disconnected` event and logs the diagnostic details.
+- If monitoring is still unavailable after an automatic restart attempt, the watchdog emits DSM's stock `The UPS has been disconnected` event and logs the diagnostic details.
 
 ### Outage Sequence
 
@@ -104,18 +102,18 @@ sequenceDiagram
 sequenceDiagram
   autonumber
   participant D as dsm
-  participant H as healthcheck
+  participant W as watchdog
 
-  D-->>H: starts timer after boot
-  H-->>D: checks module, tty, services, timers, settings, UPS status
-  alt monitoring healthy
-    H-->>D: log healthy status
+  D-->>W: starts timer after boot
+  W-->>D: reads UPS status and DSM UPS settings
+  alt UPS status readable
+    W->>W: update outage state
   else monitoring broken
-    H-->>D: restart UPS service and recheck
+    W-->>D: force-restart UPS stack and recheck
     alt recovered
-      H-->>D: log recovered status
+      W->>W: continue with recovered status
     else still broken
-      H-->>D: emit stock UPS disconnected event and log diagnostic details
+      W-->>D: emit stock UPS disconnected event and log diagnostic details
     end
   end
 ```
@@ -191,7 +189,7 @@ sudoers=/etc/sudoers.d/synology-nut-ch341-ups
 tmp="${sudoers}.tmp"
 
 cat > "$tmp" <<EORULE
-$DSM_USER ALL=(root) NOPASSWD: /bin/true, /bin/sh /tmp/synology-ch341-ups-install.sh *, /usr/local/sbin/ch341-ups-healthcheck.sh, /usr/local/sbin/ch341-ups.sh status, /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_wait_time, /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_safeshutdown, /usr/syno/bin/synoups status, /bin/sh /tmp/probe-nas-ups.sh
+$DSM_USER ALL=(root) NOPASSWD: /bin/true, /bin/sh /tmp/synology-ch341-ups-install.sh *, /usr/local/sbin/ch341-ups.sh status, /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_wait_time, /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_safeshutdown, /usr/syno/bin/synoups status, /bin/sh /tmp/probe-nas-ups.sh
 EORULE
 
 chmod 0440 "$tmp"
@@ -299,14 +297,14 @@ Reboot DSM after `make restore` before doing a fresh install/test cycle.
 make check
 ```
 
-`make check` is a manual DSM runtime health report over SSH. Ongoing monitoring is handled by the DSM healthcheck timer installed on the NAS.
+`make check` is a manual DSM runtime report over SSH. Ongoing monitoring is handled by the watchdog timer installed on the NAS.
 
 It verifies:
 
-- installed healthcheck result
 - CH341 kernel module and `/dev/ttyUSB*`
 - NUT driver, server, and monitor processes
 - DSM UPS services and timers
+- watchdog UPS-stack recovery wiring
 - output-shutdown helper wiring
 - installed DSM/NUT event wiring for the five stock UPS events
 - DSM UPS wait time and output-shutdown setting

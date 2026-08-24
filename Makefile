@@ -34,7 +34,7 @@ help:
 	@printf '  %-12s %s\n' 'build' 'build CH341 kernel module'
 	@printf '  %-12s %s\n' 'install' 'install or update the DSM UPS setup'
 	@printf '  %-12s %s\n' 'restore' 'remove the DSM UPS setup and restore backed-up files'
-	@printf '  %-12s %s\n' 'check' 'run the UPS health report'
+	@printf '  %-12s %s\n' 'check' 'run the UPS runtime report'
 	@printf '  %-12s %s\n' 'probe' 'run NAS USB/NUT diagnostics over SSH'
 
 require-nas:

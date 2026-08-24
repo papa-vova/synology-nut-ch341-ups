@@ -5,7 +5,7 @@ set -euo pipefail
 #   check-over-ssh.sh user@nas
 #
 # The remote DSM user must already have the passwordless sudo permissions
-# documented in README.md. Output is a copy/pasteable health report.
+# documented in README.md. Output is a copy/pasteable runtime report.
 
 target="${1:-}"
 
@@ -74,12 +74,17 @@ check_enabled() {
   fi
 }
 
-health_out="$(sudo /usr/local/sbin/ch341-ups-healthcheck.sh 2>&1)"
-health_rc=$?
-if [ "$health_rc" -eq 0 ]; then
-  ok "healthcheck" "passed"
+module_dst="/usr/local/lib/modules/ch341-ups/ch341.ko"
+kernel="$(uname -r)"
+if [ -f "$module_dst" ]; then
+  vermagic="$(/bin/grep -ao 'vermagic=[^[:space:]]*' "$module_dst" 2>/dev/null | awk -F= 'NR == 1 {print $2}')"
+  if [ -n "$vermagic" ] && [ "$vermagic" != "$kernel" ]; then
+    bad "kernel module file" "vermagic $vermagic != running kernel $kernel"
+  else
+    ok "kernel module file" "$module_dst"
+  fi
 else
-  bad "healthcheck" "$(first_line "$health_out")"
+  bad "kernel module file" "$module_dst missing"
 fi
 
 if lsmod | grep -q '^ch341 '; then
@@ -105,10 +110,14 @@ done
 
 check_active ups-usb.service
 check_active ch341-ups.service
-check_active ch341-ups-healthcheck.timer
-check_enabled ch341-ups-healthcheck.timer
 check_active ch341-ups-watchdog.timer
 check_enabled ch341-ups-watchdog.timer
+
+if systemctl cat ups-usb.service 2>/dev/null | grep -Fq 'ExecStart=/usr/local/sbin/ch341-ups.sh start'; then
+  ok "ups-usb.service wrapper" "installed"
+else
+  bad "ups-usb.service wrapper" "missing or not wired"
+fi
 
 if systemctl cat ch341-ups-output-shutdown.service 2>/dev/null | grep -Fq 'ExecStart=/usr/local/sbin/ch341-ups-output-shutdown.sh'; then
   ok "ch341-ups-output-shutdown.service" "installed"
@@ -116,10 +125,32 @@ else
   bad "ch341-ups-output-shutdown.service" "missing or not wired"
 fi
 
-if [ "$health_rc" -eq 0 ]; then
+if grep -Fq "NOTIFYCMD /usr/sbin/upssched" /etc/ups/upsmon.conf 2>/dev/null &&
+   grep -Fq "NOTIFYFLAG ONBATT EXEC" /etc/ups/upsmon.conf 2>/dev/null &&
+   grep -Fq "NOTIFYFLAG ONLINE EXEC" /etc/ups/upsmon.conf 2>/dev/null &&
+   grep -Fq "NOTIFYFLAG LOWBATT EXEC" /etc/ups/upsmon.conf 2>/dev/null &&
+   grep -Fq "NOTIFYFLAG FSD EXEC" /etc/ups/upsmon.conf 2>/dev/null &&
+   grep -Fq "CMDSCRIPT /usr/local/sbin/ch341-upssched-cmd.sh" /etc/ups/upssched.conf 2>/dev/null &&
+   grep -Fq "AT ONBATT * EXECUTE onbatt" /etc/ups/upssched.conf 2>/dev/null &&
+   grep -Fq "AT ONLINE * EXECUTE online" /etc/ups/upssched.conf 2>/dev/null &&
+   grep -Fq "AT LOWBATT * EXECUTE lowbatt" /etc/ups/upssched.conf 2>/dev/null &&
+   grep -Fq "AT FSD * EXECUTE fsd" /etc/ups/upssched.conf 2>/dev/null; then
+  ok "DSM/NUT event wiring" "installed"
+else
+  bad "DSM/NUT event wiring" "missing or not wired"
+fi
+
+if grep -Fq "force_restart_ups_stack()" /usr/local/sbin/ch341-ups-watchdog.sh 2>/dev/null; then
+  ok "watchdog UPS-stack recovery" "installed"
+else
+  bad "watchdog UPS-stack recovery" "missing"
+fi
+
+if grep -Fq "DSM Safe/Standby detected" /usr/local/sbin/ch341-ups-output-shutdown.sh 2>/dev/null &&
+   grep -Fq "AC-return Safe/Standby reboot path" /usr/local/sbin/ch341-ups-output-shutdown.sh 2>/dev/null; then
   ok "shutdown manager policy" "Safe/Standby first, output cut or AC-return reboot"
 else
-  bad "shutdown manager policy" "not confirmed by healthcheck"
+  bad "shutdown manager policy" "not wired"
 fi
 
 wait_time="$(sudo /usr/syno/bin/synogetkeyvalue /usr/syno/etc/ups/synoups.conf ups_wait_time 2>/dev/null)"

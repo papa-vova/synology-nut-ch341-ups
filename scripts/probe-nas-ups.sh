@@ -44,7 +44,6 @@ section "UPS status"
 section "Services"
 systemctl is-active ups-usb.service 2>/dev/null || true
 systemctl is-active ch341-ups.service 2>/dev/null || true
-systemctl is-active ch341-ups-healthcheck.timer 2>/dev/null || true
 systemctl is-active ch341-ups-watchdog.timer 2>/dev/null || true
 systemctl is-active ch341-ups-output-shutdown.service 2>/dev/null || true
 

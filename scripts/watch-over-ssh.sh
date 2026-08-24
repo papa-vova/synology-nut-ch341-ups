@@ -4,8 +4,7 @@ set -euo pipefail
 # Usage:
 #   watch-over-ssh.sh user@nas [interval_seconds]
 #
-# Lightweight live monitor for physical UPS tests. This avoids running the
-# healthcheck loop during an outage, because healthcheck can restart services.
+# Lightweight live monitor for physical UPS tests.
 
 target="${1:-}"
 interval="${2:-15}"
@@ -47,10 +46,9 @@ printf 'targets shutdown=%s safe_shutdown=%s output_helper=%s\n' \
   "$(synosystemctl get-active-status shutdown.target 2>/dev/null)" \
   "$(synosystemctl get-active-status safe-shutdown.target 2>/dev/null)" \
   "$(systemctl is-active ch341-ups-output-shutdown.service 2>/dev/null)"
-printf 'services ups_usb=%s watchdog_timer=%s health_timer=%s\n' \
+printf 'services ups_usb=%s watchdog_timer=%s\n' \
   "$(systemctl is-active ups-usb.service 2>/dev/null)" \
-  "$(systemctl is-active ch341-ups-watchdog.timer 2>/dev/null)" \
-  "$(systemctl is-active ch341-ups-healthcheck.timer 2>/dev/null)"
+  "$(systemctl is-active ch341-ups-watchdog.timer 2>/dev/null)"
 printf 'markers=%s\n' "$(ls /tmp/ups.safedown /etc/killpower /run/ch341-ups-safemode.requested 2>/dev/null | tr '\n' ' ')"
 
 for log in \
