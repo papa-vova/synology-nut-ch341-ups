@@ -55,7 +55,7 @@ UPS_ON_DELAY_SECONDS="${UPS_ON_DELAY_SECONDS:-180}"
 command="install"
 for arg in "$@"; do
 	case "$arg" in
-		status|restore)
+		status|restore|check)
 			command="$arg"
 			;;
 		WAIT_SECONDS=*)
@@ -1573,6 +1573,177 @@ restore() {
 	log "Restore complete. Reboot DSM before installing again."
 }
 
+check_first_line() {
+	printf '%s\n' "$1" | sed -n '1p'
+}
+
+check_first_line_or_timeout() {
+	value="$1"
+	[ -n "$value" ] || value="timed out"
+	check_first_line "$value"
+}
+
+check_ok() {
+	label="$1"
+	detail="${2:-}"
+	printf 'PASS %-35s %s\n' "$label" "$detail"
+}
+
+check_bad() {
+	label="$1"
+	detail="${2:-}"
+	CHECK_FAIL=1
+	printf 'FAIL %-35s %s\n' "$label" "$detail"
+}
+
+check_active_unit() {
+	unit="$1"
+	if systemctl is-active --quiet "$unit" 2>/dev/null; then
+		check_ok "$unit" "active"
+	else
+		check_bad "$unit" "$(systemctl is-active "$unit" 2>/dev/null)"
+	fi
+}
+
+check_enabled_unit() {
+	unit="$1"
+	if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+		check_ok "$unit" "enabled"
+	else
+		check_bad "$unit" "$(systemctl is-enabled "$unit" 2>/dev/null)"
+	fi
+}
+
+check_install() {
+	require_root
+	set +e
+	CHECK_FAIL=0
+
+	kernel="$(uname -r)"
+	if [ -f "$MODULE_DST" ]; then
+		vermagic="$(/bin/grep -ao 'vermagic=[^[:space:]]*' "$MODULE_DST" 2>/dev/null | awk -F= 'NR == 1 {print $2}')"
+		if [ -n "$vermagic" ] && [ "$vermagic" != "$kernel" ]; then
+			check_bad "kernel module file" "vermagic $vermagic != running kernel $kernel"
+		else
+			check_ok "kernel module file" "$MODULE_DST"
+		fi
+	else
+		check_bad "kernel module file" "$MODULE_DST missing"
+	fi
+
+	if lsmod | grep -q '^ch341 '; then
+		check_ok "kernel module ch341" "loaded"
+	else
+		check_bad "kernel module ch341" "not loaded"
+	fi
+
+	tty="$(ls /dev/ttyUSB* 2>/dev/null | sed -n '1p')"
+	if [ -n "$tty" ]; then
+		check_ok "serial TTY" "$tty"
+	else
+		check_bad "serial TTY" "no /dev/ttyUSB*"
+	fi
+
+	for process in nutdrv_qx upsd upsmon; do
+		if ps aux | grep -v grep | grep -q "$process"; then
+			check_ok "process $process" "running"
+		else
+			check_bad "process $process" "not running"
+		fi
+	done
+
+	check_active_unit ups-usb.service
+	check_active_unit ch341-ups.service
+	check_active_unit ch341-ups-watchdog.timer
+	check_enabled_unit ch341-ups-watchdog.timer
+
+	if systemctl cat ups-usb.service 2>/dev/null | grep -Fq 'ExecStart=/usr/local/sbin/ch341-ups.sh start'; then
+		check_ok "ups-usb.service wrapper" "installed"
+	else
+		check_bad "ups-usb.service wrapper" "missing or not wired"
+	fi
+
+	if systemctl cat ch341-ups-output-shutdown.service 2>/dev/null | grep -Fq 'ExecStart=/usr/local/sbin/ch341-ups-output-shutdown.sh'; then
+		check_ok "ch341-ups-output-shutdown.service" "installed"
+	else
+		check_bad "ch341-ups-output-shutdown.service" "missing or not wired"
+	fi
+
+	if grep -Fq "NOTIFYCMD /usr/sbin/upssched" "$UPSMON_CONF" 2>/dev/null &&
+		grep -Fq "NOTIFYFLAG ONBATT EXEC" "$UPSMON_CONF" 2>/dev/null &&
+		grep -Fq "NOTIFYFLAG ONLINE EXEC" "$UPSMON_CONF" 2>/dev/null &&
+		grep -Fq "NOTIFYFLAG LOWBATT EXEC" "$UPSMON_CONF" 2>/dev/null &&
+		grep -Fq "NOTIFYFLAG FSD EXEC" "$UPSMON_CONF" 2>/dev/null &&
+		grep -Fq "CMDSCRIPT $UPSSCHED_CMD_SCRIPT" "$UPSSCHED_CONF" 2>/dev/null &&
+		grep -Fq "AT ONBATT * EXECUTE onbatt" "$UPSSCHED_CONF" 2>/dev/null &&
+		grep -Fq "AT ONLINE * EXECUTE online" "$UPSSCHED_CONF" 2>/dev/null &&
+		grep -Fq "AT LOWBATT * EXECUTE lowbatt" "$UPSSCHED_CONF" 2>/dev/null &&
+		grep -Fq "AT FSD * EXECUTE fsd" "$UPSSCHED_CONF" 2>/dev/null; then
+		check_ok "DSM/NUT event wiring" "installed"
+	else
+		check_bad "DSM/NUT event wiring" "missing or not wired"
+	fi
+
+	if grep -Fq "force_restart_ups_stack()" "$WATCHDOG_SCRIPT" 2>/dev/null; then
+		check_ok "watchdog UPS-stack recovery" "installed"
+	else
+		check_bad "watchdog UPS-stack recovery" "missing"
+	fi
+
+	if grep -Fq "DSM Safe/Standby detected" "$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null &&
+		grep -Fq "AC-return Safe/Standby reboot path" "$OUTPUT_SHUTDOWN_SCRIPT" 2>/dev/null; then
+		check_ok "shutdown manager policy" "Safe/Standby first, output cut or AC-return reboot"
+	else
+		check_bad "shutdown manager policy" "not wired"
+	fi
+
+	wait_time="$(/usr/syno/bin/synogetkeyvalue "$SYNOUPS_CONF" ups_wait_time 2>/dev/null)"
+	if [ -n "$wait_time" ]; then
+		check_ok "DSM UPS wait time" "${wait_time}s"
+	else
+		check_bad "DSM UPS wait time" "not readable"
+	fi
+
+	safe_shutdown="$(/usr/syno/bin/synogetkeyvalue "$SYNOUPS_CONF" ups_safeshutdown 2>/dev/null)"
+	if [ -n "$safe_shutdown" ]; then
+		check_ok "DSM UPS output shutdown" "$safe_shutdown"
+	else
+		check_bad "DSM UPS output shutdown" "not readable"
+	fi
+
+	if [ -e /tmp/ups.safedown ]; then
+		check_bad "DSM UPS status" "skipped: DSM safe-down marker active"
+	else
+		synoups_status="$(/usr/bin/timeout 8 /usr/syno/bin/synoups status 2>&1)"
+		case "$synoups_status" in
+			*OL*|*OB*|*LB*)
+				check_ok "DSM UPS status" "$(check_first_line "$synoups_status")"
+				;;
+			*)
+				check_bad "DSM UPS status" "$(check_first_line_or_timeout "$synoups_status")"
+				;;
+		esac
+	fi
+
+	nut_status="$(/usr/bin/timeout 8 /usr/bin/upsc "$UPS_NAME@localhost" ups.status 2>&1)"
+	case "$nut_status" in
+		*OL*|*OB*|*LB*)
+			check_ok "NUT UPS status" "$(check_first_line "$nut_status")"
+			;;
+		*)
+			check_bad "NUT UPS status" "$(check_first_line_or_timeout "$nut_status")"
+			;;
+	esac
+
+	if [ "$CHECK_FAIL" -eq 0 ]; then
+		printf '%s\n' "UPS monitoring: PASS"
+		exit 0
+	fi
+
+	printf '%s\n' "UPS monitoring: FAIL - see failed checks above"
+	exit 1
+}
+
 case "$command" in
 	install)
 		install
@@ -1586,8 +1757,11 @@ case "$command" in
 	restore)
 		restore
 		;;
+	check)
+		check_install
+		;;
 	*)
-		printf 'Usage: %s {install|status|restore}\n' "$0" >&2
+		printf 'Usage: %s {install|status|restore|check}\n' "$0" >&2
 		exit 2
 		;;
 esac
