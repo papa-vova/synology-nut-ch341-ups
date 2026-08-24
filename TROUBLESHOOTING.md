@@ -4,14 +4,16 @@ Commands below assume the README target variables are set:
 
 ```sh
 DSM_USER=admin
-NAS="$DSM_USER@nas"
+NAS=nas
+SSH_TARGET="$DSM_USER@$NAS"
 ```
 
 If `make check` reports `FAIL`, collect NAS-side details:
 
 ```sh
-ssh "$NAS" "sudo /usr/local/sbin/synology-ch341-ups-install.sh status"
-ssh "$NAS" "journalctl -u ch341-ups-watchdog.service -u ch341-ups-output-shutdown.service -u ups-usb.service --since '30 minutes ago' --no-pager"
+make check NAS="$NAS" DSM_USER="$DSM_USER"
+ssh "$SSH_TARGET" "sudo /usr/local/sbin/ch341-ups.sh status"
+ssh "$SSH_TARGET" "sudo journalctl -u ch341-ups-watchdog.service -u ch341-ups-output-shutdown.service -u ups-usb.service --since '30 minutes ago' --no-pager"
 ```
 
 ## DSM shows no USB UPS
@@ -66,12 +68,13 @@ Check whether the driver has shutdown-delay parameters:
 /usr/bin/upsc ups@localhost driver.parameter.ondelay
 ```
 
-Then check whether the helper attempted the standard NUT shutdown command:
+Then check whether the helper attempted the raw Megatec output-cut commands:
 
 ```sh
 systemctl status ch341-ups-output-shutdown.service --no-pager
 journalctl -u ch341-ups-output-shutdown.service --since "30 minutes ago" --no-pager
 grep -iE 'raw Megatec|output shutdown|shutdown.return|Shutdown failed' /var/log/messages /var/log/systemd/ch341-ups-output-shutdown.service.log
+grep -iE 'raw Megatec|output cut|AC returned|Safe/Standby' /var/log/ch341-ups-recovery.log
 ```
 
 Some UPS firmware may ignore the Megatec/Qx shutdown-return command. In that
@@ -84,7 +87,7 @@ If the NAS enters Safe/Standby Mode but does not boot after AC returns, check
 whether the output-cut path or the AC-return fallback ran:
 
 ```sh
-grep -iE 'raw Megatec|output cut|AC returned|Safe/Standby|safe shutdown|watchdog|online|ups.status' /var/log/ups.log /var/log/messages /var/log/systemd/ch341-ups-output-shutdown.service.log
+grep -iE 'raw Megatec|output cut|AC returned|Safe/Standby|safe shutdown|watchdog|online|ups.status' /var/log/ch341-ups-recovery.log /var/log/ups.log /var/log/messages /var/log/systemd/ch341-ups-output-shutdown.service.log
 ```
 
 The shutdown manager enters DSM Safe/Standby first. From there it tries UPS

@@ -40,14 +40,14 @@ The setup stays as close as practical to stock DSM:
 #### Output Shutdown
 
 - The shutdown manager reads DSM's UPS-output-shutdown setting and re-checks live UPS status before entering the output-control path.
-- If the setting is enabled and the UPS is still `OB` or `LB`, it lets DSM enter Safe/Standby first, then sends Megatec output-cut commands from that low-power state.
+- If DSM UPS output shutdown is enabled and the UPS is still on battery, the shutdown manager waits for DSM Safe/Standby and then attempts UPS output shutdown from that safe state.
 - If the UPS refuses output cut, the helper waits in Safe/Standby and reboots DSM after AC input returns.
-- A `safe-shutdown.service` drop-in remains installed as a compatibility path for DSM flows that run Synology's safe-shutdown service directly.
+- A compatibility hook covers DSM safe-shutdown flows that bypass the watchdog, so they still use the same serial-UPS recovery path.
 
 #### Healthcheck
 
 - The healthcheck is also a DSM systemd timer, not a separate always-running process.
-- `ch341-ups-healthcheck.timer` runs 5 minutes after boot and every 15 minutes after that. It checks the module, TTY, DSM service wiring, timers, NUT processes, DSM UPS settings, and live UPS status as shown in the monitoring sequence.
+- The healthcheck runs after boot and periodically on its own installed timer, 15 minutes by default. It reads DSM UPS settings during each run, but DSM Control Panel does not configure the healthcheck cadence.
 - UPS monitoring connect/recovery emits DSM's stock `The UPS has been connected` event.
 - If monitoring is still unavailable after an automatic restart attempt, the healthcheck emits DSM's stock `The UPS has been disconnected` event and logs the diagnostic details.
 
@@ -142,7 +142,7 @@ export UPS_ON_DELAY_SECONDS=180
   and `probe`.
 - `DSM_USER` is the DSM account used for SSH login and sudo authorization.
 - `WAIT_SECONDS` is the default DSM UPS wait time used only if DSM has no valid saved setting. Later UI changes are respected.
-- `UPS_OFF_DELAY_SECONDS` and `UPS_ON_DELAY_SECONDS` configure UPS output cutoff/restore delays.
+- `UPS_OFF_DELAY_SECONDS` and `UPS_ON_DELAY_SECONDS` configure NUT output cutoff/restore delay values for UPS firmware that honors NUT shutdown-return commands. This tested UPS refused those commands, so recovery also has the Safe/Standby AC-return reboot fallback described below.
 
 #### Passwordless Access Configuration (Mandatory)
 
@@ -242,11 +242,11 @@ rules decide which delivery channels receive them.
 
 - Control Panel -> Hardware & Power -> UPS -> Enable UPS support: enabled.
 - UPS type: `USB UPS`.
-- Time before Synology NAS enters Standby Mode: `Customize time`; the fallback default is 15 minutes only when DSM has no valid saved setting.
+- Time before Synology NAS enters Standby Mode: `Customize time`; this DSM setting is the shutdown wait time used at runtime.
 - `Shut down UPS when the system enters Standby Mode`: checked if the shutdown manager should try to cut UPS output during the shutdown path.
 - `Until low battery`: not recommended for this UPS class because battery/runtime reporting is not reliable enough for the shutdown policy.
 
-The watchdog reads DSM's UPS wait time at runtime. When the wait time expires, low battery is reported, or FSD is received, the shutdown manager reads the UPS-output-shutdown setting, re-checks that the UPS is still on battery, enters DSM Safe/Standby, and then tries the UPS output-cut path. If output cut is rejected, the helper waits in Safe/Standby for AC return and reboots DSM. Changing those two UI settings does not require reinstalling.
+The watchdog reads DSM's UPS wait time from the UPS settings at runtime. `WAIT_SECONDS` is only the installer fallback, defaulting to 15 minutes, used when DSM has no valid saved wait time. Choose the DSM wait time so real battery capacity leaves reserve for Safe/Standby and recovery. When the wait time expires, low battery is reported, or FSD is received, the shutdown manager reads the UPS-output-shutdown setting, re-checks that the UPS is still on battery, enters DSM Safe/Standby, and then tries the UPS output-cut path. If output cut is rejected, the helper waits in Safe/Standby for AC return and reboots DSM. Changing those two UI settings does not require reinstalling.
 
 ### Build And Install
 
@@ -269,6 +269,14 @@ Install or update the UPS setup:
 ```sh
 make install
 ```
+
+Remove the installed NAS-side setup and restore backed-up DSM/NUT files:
+
+```sh
+make restore
+```
+
+Reboot DSM after `make restore` before doing a fresh install/test cycle.
 
 ### Normal Notifications
 
@@ -330,13 +338,14 @@ Expected:
 2. Run `make check`.
 3. Cut mains input to the UPS.
 4. Wait longer than the configured DSM UPS wait time, or until the UPS reports low battery.
-5. The shutdown manager asks the UPS to cut output if DSM output shutdown is enabled and the UPS is still `OB` or `LB`.
+5. The shutdown manager re-checks status and asks DSM to enter Safe/Standby if the UPS is still `OB` or `LB`.
 6. DSM enters Safe/Standby: services stop and volumes are unmounted.
-7. If the UPS accepts output cut, output drops and later returns after mains returns.
-8. If the UPS refuses output cut, the helper waits in Safe/Standby for AC input to return.
-9. Restore mains input to the UPS.
-10. Expected: the NAS boots normally after UPS output returns, or reboots from Safe/Standby when the helper detects AC return.
-11. DSM sends the UPS-connected notification after the UPS stack starts (if configured).
-12. Run `make check` again.
+7. If DSM output shutdown is enabled, the helper tries to cut UPS output from Safe/Standby.
+8. If the UPS accepts output cut, output drops and later returns after mains returns.
+9. If the UPS refuses output cut, the helper waits in Safe/Standby for AC input to return.
+10. Restore mains input to the UPS.
+11. Expected: the NAS boots normally after UPS output returns, or reboots from Safe/Standby when the helper detects AC return.
+12. DSM sends the UPS-connected notification after the UPS stack starts (if configured).
+13. Run `make check` again.
 
 If the check reports a problem, use [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

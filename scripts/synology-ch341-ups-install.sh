@@ -4,8 +4,8 @@ set -eu
 # Public environment:
 #   WAIT_SECONDS            Default DSM UPS wait time used if DSM has no valid setting.
 #   SHUTDOWN_UPS            yes/no default used if DSM has no valid UPS output shutdown setting.
-#   UPS_OFF_DELAY_SECONDS   NUT offdelay before UPS output cutoff.
-#   UPS_ON_DELAY_SECONDS    NUT ondelay before UPS output restore.
+#   UPS_OFF_DELAY_SECONDS   NUT offdelay for UPSes that honor shutdown-return.
+#   UPS_ON_DELAY_SECONDS    NUT ondelay for UPSes that honor shutdown-return.
 #   UPS_NAME                Local NUT UPS name. Default: ups.
 #   DOC_USER                DSM user whose home receives the local install note.
 #   DOC_FILE_NAME           Install note filename.
@@ -1595,13 +1595,13 @@ NAS kernel: $(uname -a)
 - \`upssched\` uses \`$UPSSCHED_CMD_SCRIPT\` as its command script for battery-mode and mains-restored notifications.
 - The watchdog is a DSM systemd timer, not a separate always-running process.
 - It uses DSM's UPS/NUT status to detect prolonged battery mode and trigger the Safe/Standby recovery path.
-- It reads DSM's UPS wait time at runtime. Wait-time expiry and low-battery/FSD events start the shutdown manager.
+- It reads DSM's UPS wait time from Control Panel settings at runtime. Wait-time expiry and low-battery/FSD events start the shutdown manager.
 - If DSM has no valid \`ups_safeshutdown\` value, the startup path initializes it to \`$SHUTDOWN_UPS\`. The shutdown manager reads that setting at runtime, re-checks live UPS status, lets DSM enter Safe/Standby, and then tries the Megatec output-cut path if the UPS is still \`OB\` or \`LB\`. If the UPS refuses output cut, the helper waits in Safe/Standby, polls the UPS directly, and reboots DSM when AC input returns.
-- \`safe-shutdown.service\` has a drop-in that runs \`$SAFE_SHUTDOWN_SCRIPT\` instead of Synology's original safe-shutdown script. This compatibility path preserves Synology's \`synoups shutdownups\` behavior for DSM flows that run the safe-shutdown service directly.
+- A compatibility hook covers DSM safe-shutdown flows that bypass the watchdog, so they still use the same serial-UPS recovery path.
 - The NUT driver is configured with \`offdelay = $UPS_OFF_DELAY_SECONDS\` and \`ondelay = $UPS_ON_DELAY_SECONDS\`, but recovery does not depend on those values alone. If the UPS refuses output-cut commands, the Safe/Standby helper waits for AC input to return and reboots DSM from that safe state.
 - The UPS does not report battery charge/runtime/model fields directly. The config supplies NUT fallback values so DSM can display a normal USB UPS. Battery charge/runtime are estimates; shutdown uses DSM's configured fixed wait time, not the displayed runtime estimate.
 - The healthcheck is a DSM systemd timer, not a separate always-running process.
-- It runs 5 minutes after boot and every 15 minutes after that. It checks live UPS monitoring plus the persistent boot hook, UPS service drop-in, scheduler wrapper, watchdog timer, safe-shutdown drop-in, DSM wait time, and DSM UPS-output-shutdown flag.
+- It runs after boot and periodically on its own installed timer, 15 minutes by default. It reads DSM UPS settings during each run, but DSM Control Panel does not configure the healthcheck cadence.
 - User-visible UPS notifications use DSM's stock Power supply events: UPS connected/recovered, battery mode, low battery, AC-return, and disconnected/unavailable.
 
 ## DSM Settings To Check
@@ -1615,7 +1615,7 @@ NAS kernel: $(uname -a)
 - Control Panel -> Hardware & Power -> UPS:
   - UPS support should be enabled.
   - UPS type should show USB UPS.
-  - Time before entering Standby/Safe Mode should match the intended UPS wait time. The fallback default is 15 minutes only when DSM has no valid saved setting.
+  - Time before entering Standby/Safe Mode is the shutdown wait time used at runtime. The installer fallback, \`$WAIT_SECONDS\` seconds for this install, is used only when DSM has no valid saved wait time.
   - "Shut down UPS when the system enters Standby Mode" should be checked if the shutdown manager should try to cut UPS output during the shutdown path.
 - UPS wait time and UPS-output-shutdown changes made in Control Panel are preserved across UPS service restarts and are read at runtime.
 
@@ -1628,6 +1628,7 @@ systemctl status ch341-ups-output-shutdown.service --no-pager
 systemctl cat safe-shutdown.service
 $STACK_SCRIPT status
 /usr/bin/upsc ups@localhost
+tail -n 120 /var/log/ch341-ups-recovery.log
 grep -E '^CMDSCRIPT|^AT (ONBATT|ONLINE|LOWBATT|FSD)' /etc/ups/upssched.conf
 systemctl list-timers ch341-ups-healthcheck.timer --no-pager
 systemctl list-timers ch341-ups-watchdog.timer --no-pager
@@ -1680,6 +1681,13 @@ systemctl status ch341-ups-watchdog.service --no-pager
 - Minor DSM updates that keep the same \`uname -r\` should usually keep working.
 - DSM updates that change the running kernel ABI can make \`ch341.ko\` fail to load. The healthcheck detects this by comparing module \`vermagic\` with \`uname -r\` and sends an alert instead of failing silently.
 - If AC returns before UPS output is cut, the Safe/Standby helper should detect AC return over the serial UPS protocol and reboot DSM. If UPS output was cut, startup after output returns depends on Control Panel -> Hardware & Power -> General -> automatic restart after power failure.
+
+## Remove
+
+From the local repository, run \`make restore\` to remove the installed services,
+scripts, drop-ins, udev rule, module copy, runtime state, recovery log, sudoers
+rule, and this note, and to restore backed-up DSM/NUT config files. Reboot DSM
+before installing again.
 EOF
 	chown "$DOC_USER":users "$doc" >/dev/null 2>&1 || true
 	chmod 644 "$doc" || true
@@ -1734,11 +1742,32 @@ restore() {
 	restore_file "$NUTSCAN_USB"
 	rm -f "$STACK_UNIT" "$HEALTH_SERVICE" "$HEALTH_TIMER" "$OUTPUT_SHUTDOWN_SERVICE" "$WATCHDOG_SERVICE" "$WATCHDOG_TIMER" "$STACK_SCRIPT" "$HEALTH_SCRIPT" "$SAFE_SHUTDOWN_SCRIPT" "$UPSSCHED_CMD_SCRIPT" "$OUTPUT_SHUTDOWN_SCRIPT" "$WATCHDOG_SCRIPT" "$UPS_USB_DROPIN" "$SAFE_SHUTDOWN_DROPIN" "$UDEV_RULE"
 	rm -f "$CONNECTED_STATE_FILE" "$POWER_STATE_FILE" "$FORCE_RESTART_FILE"
+	rm -f /run/ch341-ups-safemode.requested
+	rm -rf /run/ch341-ups-watchdog
+	rm -f "$SYNOUPS_CONF$BACKUP_SUFFIX" "$UPS_CONF$BACKUP_SUFFIX" "$UPSD_USERS$BACKUP_SUFFIX" "$UPSMON_CONF$BACKUP_SUFFIX" "$UPSSCHED_CONF$BACKUP_SUFFIX" "$NUTSCAN_USB$BACKUP_SUFFIX"
+	rm -f /var/log/ch341-ups-recovery.log /var/log/systemd/ch341-ups-output-shutdown.service.log /tmp/ch341.ko /tmp/probe-nas-ups.sh /tmp/synology-ch341-ups-install.sh
+	if [ -n "$DOC_USER" ]; then
+		home="$(doc_home || true)"
+		[ -n "$home" ] && rm -f "$home/$DOC_FILE_NAME"
+	fi
+	for doc in /var/services/homes/*/"$DOC_FILE_NAME" /volume1/homes/*/"$DOC_FILE_NAME" /home/*/"$DOC_FILE_NAME"; do
+		[ -e "$doc" ] && rm -f "$doc"
+	done
+	case "$MODULE_DIR" in
+		/usr/local/lib/modules/ch341-ups)
+			rm -rf "$MODULE_DIR"
+			;;
+		*)
+			log "Skipping unexpected module directory during restore: $MODULE_DIR"
+			;;
+	esac
+	rmmod ch341 >/dev/null 2>&1 || true
+	rm -f /etc/sudoers.d/synology-nut-ch341-ups
 	rmdir "$UPS_USB_DROPIN_DIR" >/dev/null 2>&1 || true
 	rmdir "$SAFE_SHUTDOWN_DROPIN_DIR" >/dev/null 2>&1 || true
 	udevadm control --reload-rules >/dev/null 2>&1 || true
 	systemctl daemon-reload
-	log "Restore complete. The module file in $MODULE_DIR was left in place."
+	log "Restore complete. Reboot DSM before installing again."
 }
 
 case "$command" in
